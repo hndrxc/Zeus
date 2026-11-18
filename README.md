@@ -37,6 +37,12 @@ cargo build --release --locked
 
 For the edit-and-run loop, use `cargo run --locked`. To run the simulation tests with the release profile, use `cargo test --release --locked`. The tests exercise seeded replay, combat timing, projectile interactions, arena bounds and run progression. For a crash during startup or play, the panic hook writes the latest panic to `$env:TEMP\dead-letter-crash.log` on Windows.
 
+## CI and releases
+
+Pull requests and pushes to `main` run formatting checks, simulation tests and a release build on Windows. Download the `windows-x64` artifact from the [workflow run](https://github.com/hndrxc/Zeus/actions/workflows/windows.yml) to playtest its packaged executable.
+
+To publish, update the package version in Cargo.toml and Cargo.lock, merge the tested commit, and push a tag matching that version (for example, `v1.0.0`). The tag run rebuilds and tests the game, verifies the archive, then publishes the ZIP and its SHA-256 checksum to [GitHub Releases](https://github.com/hndrxc/Zeus/releases). A prerelease version such as `1.0.0-rc.1` produces a GitHub prerelease.
+
 ## Where the code lives
 
 | File | Responsibility |
