@@ -876,7 +876,7 @@ impl Shell {
                     .bg(rgba(HUD_BG_SOFT))
                     .border_1()
                     .border_color(rgba(HUD_BORDER))
-                    .child(control_hint("WASD", "Move"))
+                    .child(control_hint("WASD / ARROWS", "Move"))
                     .child(control_hint("MOUSE", "Aim"))
                     .child(control_hint("LMB / J", "Strike"))
                     .child(control_hint("RMB / K", "Cast"))
