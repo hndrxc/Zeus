@@ -26,7 +26,11 @@ const CAST_SPEED: f32 = 11.0;
 const CAST_DAMAGE: f32 = 18.0;
 const EMERGE_TIME: f32 = 0.8;
 const LULL: f32 = 0.9;
+/// Seconds a wave clerk's entry point is marked before it starts to emerge.
+pub const SPAWN_WARNING: f32 = 0.9;
 const HEAL_BETWEEN_CHAMBERS: f32 = 25.0;
+/// Seconds the finished drill stays on screen before the run begins.
+const DRILL_OUTRO: f32 = 1.0;
 
 const S_MOVE: u8 = 0;
 const S_WIND: u8 = 1;
@@ -139,6 +143,32 @@ pub enum EnemyKind {
     Postmaster,
 }
 
+impl EnemyKind {
+    pub fn radius(self) -> f32 {
+        match self {
+            EnemyKind::Bailiff => 0.38,
+            EnemyKind::Censor => 0.32,
+            EnemyKind::Postmaster => 0.75,
+        }
+    }
+}
+
+/// A wave clerk marked on the floor at its entry point. It becomes an emerging
+/// `Enemy` at the same position when the warning runs out.
+#[derive(Clone, Debug)]
+pub struct Arrival {
+    pub kind: EnemyKind,
+    pub pos: Vec2,
+    timer: f32,
+}
+
+impl Arrival {
+    /// Rising 0..=1 progress of the entry warning.
+    pub fn progress(&self) -> f32 {
+        (1.0 - self.timer / SPAWN_WARNING).clamp(0.0, 1.0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectKind {
     Strike,
@@ -192,6 +222,40 @@ impl Blow {
             Blow::PostmasterShockwave => {
                 "At half hull it staggers, then bursts a ring. Back away while it rears up and dash through the wave."
             }
+        }
+    }
+}
+
+/// Steps of the opening drill. Each advances when the engine performs that
+/// action, whichever input scheme asked for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lesson {
+    Strike,
+    Cast,
+    Dash,
+    /// All three practised; the run begins after a short beat.
+    Complete,
+}
+
+impl Lesson {
+    /// Practised steps, in order.
+    pub const STEPS: [Lesson; 3] = [Lesson::Strike, Lesson::Cast, Lesson::Dash];
+
+    /// How many steps are already done.
+    pub fn done(self) -> usize {
+        match self {
+            Lesson::Strike => 0,
+            Lesson::Cast => 1,
+            Lesson::Dash => 2,
+            Lesson::Complete => 3,
+        }
+    }
+
+    fn next(self) -> Option<Lesson> {
+        match self {
+            Lesson::Strike => Some(Lesson::Cast),
+            Lesson::Cast => Some(Lesson::Dash),
+            Lesson::Dash | Lesson::Complete => Some(Lesson::Complete),
         }
     }
 }
@@ -411,11 +475,7 @@ impl Enemy {
     }
 
     pub fn radius(&self) -> f32 {
-        match self.kind {
-            EnemyKind::Bailiff => 0.38,
-            EnemyKind::Censor => 0.32,
-            EnemyKind::Postmaster => 0.75,
-        }
+        self.kind.radius()
     }
     fn begin(&mut self, state: u8, dur: f32) {
         self.state = state;
@@ -430,7 +490,30 @@ impl Enemy {
     fn hittable(&self) -> bool {
         self.hp > 0.0 && self.state != S_EMERGE && self.state != S_TRANS
     }
+
+    /// Angle of the first bolt in the boss ring being wound up; alternate rings
+    /// rotate by 0.2 rad so the gaps move.
+    pub fn ring_offset(&self) -> f32 {
+        if self.attack_index % 2 == 0 {
+            0.0
+        } else {
+            0.2
+        }
+    }
+
+    /// Rising 0..=1 progress of the half-hull stagger, which ends in a ring of
+    /// `SHOCKWAVE_BOLTS` bolts; 0 at any other time.
+    pub fn shockwave(&self) -> f32 {
+        if self.state == S_TRANS && self.dur > 0.0 {
+            (1.0 - self.timer / self.dur).clamp(0.02, 1.0)
+        } else {
+            0.0
+        }
+    }
 }
+
+/// Bolts in the ring that ends the Postmaster's half-hull stagger.
+pub const SHOCKWAVE_BOLTS: u32 = 14;
 
 #[derive(Clone, Debug)]
 pub struct Shot {
@@ -472,6 +555,9 @@ pub struct Game {
     pub mods: Mods,
     /// The hit that emptied the courier's hull this run, if any.
     pub killing_blow: Option<Blow>,
+    /// The opening drill's current step; `None` once the run proper is under way.
+    pub lesson: Option<Lesson>,
+    drill_outro: f32,
     owned: u16,
     seed: u64,
     run: u64,
@@ -481,6 +567,8 @@ pub struct Game {
     next_id: u32,
     live: usize,
     pending: Vec<Enemy>,
+    /// Wave clerks still marked on the floor, in spawn order.
+    pub arrivals: Vec<Arrival>,
     prev_dash: bool,
     dash_stamp: u32,
     wipe_shots: bool,
@@ -525,6 +613,8 @@ impl Game {
             ],
             mods: Mods::default(),
             killing_blow: None,
+            lesson: None,
+            drill_outro: 0.0,
             owned: 0,
             seed,
             run: 0,
@@ -534,6 +624,7 @@ impl Game {
             next_id: 0,
             live: 0,
             pending: Vec::with_capacity(4),
+            arrivals: Vec::with_capacity(4),
             prev_dash: false,
             dash_stamp: 0,
             wipe_shots: false,
@@ -554,6 +645,29 @@ impl Game {
     /// Begin (or restart) a run at chamber 1.
     pub fn start(&mut self) {
         self.run += 1;
+        self.lesson = None;
+        self.fresh_floor();
+    }
+
+    /// Begin a run with the opening drill on the Sorting Floor. Waves hold
+    /// until the drill is completed or skipped.
+    pub fn start_drill(&mut self) {
+        self.start();
+        self.lesson = Some(Lesson::Strike);
+        self.drill_outro = DRILL_OUTRO;
+    }
+
+    /// End the drill now; the run then plays out exactly as from `start`.
+    pub fn skip_drill(&mut self) {
+        if self.lesson.is_some() && self.phase == Phase::Combat {
+            self.lesson = None;
+            self.fresh_floor();
+        }
+    }
+
+    /// Reset everything a run depends on for the current `run` number. Nothing
+    /// done before this (such as the drill) can change what follows.
+    fn fresh_floor(&mut self) {
         self.reseed();
         self.phase = Phase::Combat;
         self.chamber = 1;
@@ -562,6 +676,7 @@ impl Game {
         self.shots.clear();
         self.effects.clear();
         self.pending.clear();
+        self.arrivals.clear();
         self.time = 0.0;
         self.kills = 0;
         self.seal_count = 0;
@@ -574,6 +689,14 @@ impl Game {
         self.live = 0;
         self.prev_dash = false;
         self.dash_stamp = 0;
+        self.wipe_shots = false;
+    }
+
+    /// Credit `done` toward the drill if it is the action being asked for.
+    fn practised(&mut self, done: Lesson) {
+        if self.lesson == Some(done) {
+            self.lesson = done.next();
+        }
     }
 
     fn rand(&mut self) -> f32 {
@@ -601,6 +724,16 @@ impl Game {
             self.phase = Phase::Lost;
             return;
         }
+        if self.lesson == Some(Lesson::Complete) {
+            self.drill_outro -= DT;
+            if self.drill_outro <= 0.0 {
+                self.skip_drill();
+            }
+            return;
+        }
+        if self.lesson.is_some() {
+            return;
+        }
         self.advance_waves();
     }
 
@@ -622,6 +755,7 @@ impl Game {
         self.player.invuln = 0.5;
         self.enemies.clear();
         self.pending.clear();
+        self.arrivals.clear();
         self.shots.clear();
         self.effects.clear();
         self.wave = 0;
@@ -734,6 +868,7 @@ impl Game {
                 duration: 0.3,
                 radius: 0.7,
             });
+            self.practised(Lesson::Dash);
         }
 
         if self.player.dash_time > 0.0 {
@@ -845,6 +980,7 @@ impl Game {
                 });
             }
         }
+        self.practised(Lesson::Strike);
     }
 
     fn do_cast(&mut self) {
@@ -863,6 +999,7 @@ impl Game {
             pierce: self.mods.pierce,
             hit_mask: 0,
         });
+        self.practised(Lesson::Cast);
     }
 
     /// Returns true when the damage actually landed.
@@ -986,8 +1123,13 @@ impl Game {
             let c = clamp_arena(Vec2::from_angle(a) * rad, r + 0.1);
             best = c;
             let mut ok = (c - self.player.pos).len() >= 3.0;
-            for e in self.enemies.iter().chain(self.pending.iter()) {
-                if (e.pos - c).len() < 1.1 {
+            let taken = self
+                .enemies
+                .iter()
+                .chain(self.pending.iter())
+                .map(|e| e.pos);
+            for p in taken.chain(self.arrivals.iter().map(|a| a.pos)) {
+                if (p - c).len() < 1.1 {
                     ok = false;
                 }
             }
@@ -1005,10 +1147,28 @@ impl Game {
                 _ => 0.38,
             };
             let pos = self.pick_spawn(r);
-            let e = self.make_enemy(kind, pos);
-            self.enemies.push(e);
+            self.arrivals.push(Arrival {
+                kind,
+                pos,
+                timer: SPAWN_WARNING,
+            });
         }
         self.wave += 1;
+    }
+
+    /// Count down marked entry points; each expired one emerges where it was marked.
+    fn land_arrivals(&mut self) {
+        let mut i = 0;
+        while i < self.arrivals.len() {
+            self.arrivals[i].timer -= DT;
+            if self.arrivals[i].timer > 0.0 {
+                i += 1;
+                continue;
+            }
+            let a = self.arrivals.remove(i);
+            let e = self.make_enemy(a.kind, a.pos);
+            self.enemies.push(e);
+        }
     }
 
     fn update_enemies(&mut self) {
@@ -1102,7 +1262,14 @@ impl Game {
                     e.begin(S_MOVE, 0.0);
                     e.cd = 0.8;
                     let pos = e.pos;
-                    self.ring(pos, 14, 0.0, 4.6, 9.0, Blow::PostmasterShockwave);
+                    self.ring(
+                        pos,
+                        SHOCKWAVE_BOLTS,
+                        0.0,
+                        4.6,
+                        9.0,
+                        Blow::PostmasterShockwave,
+                    );
                 }
                 return;
             }
@@ -1274,7 +1441,7 @@ impl Game {
         match e.attack {
             ATT_RING => {
                 let n = if phase2 { 18 } else { 12 };
-                let off = if e.attack_index % 2 == 0 { 0.0 } else { 0.2 };
+                let off = e.ring_offset();
                 self.ring(e.pos, n, off, 4.2, 9.0, Blow::PostmasterRing);
                 e.begin(S_REC, 0.9);
             }
@@ -1390,6 +1557,7 @@ impl Game {
                 });
             }
             self.pending.clear();
+            self.arrivals.clear();
             self.shots.retain(|s| !s.hostile);
         }
     }
@@ -1402,7 +1570,8 @@ impl Game {
     }
 
     fn advance_waves(&mut self) {
-        if !self.enemies.is_empty() || !self.pending.is_empty() {
+        self.land_arrivals();
+        if !self.enemies.is_empty() || !self.pending.is_empty() || !self.arrivals.is_empty() {
             self.lull = LULL;
             return;
         }
@@ -1419,6 +1588,62 @@ impl Game {
             self.roll_choices();
             self.phase = Phase::Choice;
         }
+    }
+}
+
+/// Hooks for tests outside this module that stage single attacks.
+#[cfg(test)]
+impl Game {
+    /// A started run whose waves never spawn.
+    pub(crate) fn quiet_arena(seed: u64) -> Game {
+        let mut g = Game::new(seed);
+        g.start();
+        g.lull = f32::INFINITY;
+        g.wave = waves_in(1);
+        g
+    }
+
+    /// Place an enemy one tick from releasing `attack` toward `dir`, with its aim
+    /// already locked. `attack_index` picks the boss ring's rotation; an
+    /// `attack` of `None` stages the end of the Postmaster's half-hull stagger.
+    pub(crate) fn stage_release(
+        &mut self,
+        kind: EnemyKind,
+        attack: Option<u8>,
+        attack_index: u32,
+        pos: Vec2,
+        dir: Vec2,
+        phase2: bool,
+    ) {
+        let mut e = self.make_enemy(kind, pos);
+        e.emerging = false;
+        e.dir = dir;
+        e.phase2 = phase2;
+        e.attack_index = attack_index;
+        match attack {
+            Some(a) => {
+                e.attack = a;
+                e.begin(S_WIND, 0.8);
+            }
+            None => e.begin(S_TRANS, 1.3),
+        }
+        e.timer = DT;
+        self.effects.clear();
+        self.enemies.push(e);
+    }
+
+    /// True while enemy `i` is still winding up or carrying out an attack.
+    pub(crate) fn attacking(&self, i: usize) -> bool {
+        matches!(self.enemies[i].state, S_WIND | S_ACT | S_TRANS)
+    }
+
+    /// Keep enemy `i` in the arena but never let it start another attack.
+    pub(crate) fn disarm(&mut self, i: usize) {
+        let e = &mut self.enemies[i];
+        if e.state != S_MOVE {
+            e.begin(S_MOVE, 0.0);
+        }
+        e.cd = f32::INFINITY;
     }
 }
 
@@ -1723,6 +1948,238 @@ mod tests {
         let t = g.time;
         g.step(idle());
         assert_eq!(g.time, t);
+    }
+
+    /// Step idle from a fresh run until the first wave is marked on the floor.
+    fn until_marked(g: &mut Game) -> usize {
+        for tick in 0..600 {
+            g.step(idle());
+            if !g.arrivals.is_empty() {
+                return tick;
+            }
+        }
+        panic!("no wave was marked");
+    }
+
+    #[test]
+    fn wave_entry_points_are_marked_for_the_warning_interval_before_clerks_emerge() {
+        let mut g = Game::new(19);
+        g.start();
+        until_marked(&mut g);
+        let kinds: Vec<EnemyKind> = g.arrivals.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, wave_kinds(1, 0));
+        let marks: Vec<Vec2> = g.arrivals.iter().map(|a| a.pos).collect();
+        for m in &marks {
+            assert!(
+                (*m - g.player.pos).len() >= 1.0,
+                "marker on top of the courier"
+            );
+        }
+
+        // Nothing in the wave exists, and so nothing can attack, while it is marked.
+        let mut marked_ticks = 1;
+        let mut last = g.arrivals[0].progress();
+        while !g.arrivals.is_empty() {
+            assert!(g.enemies.is_empty());
+            assert!(g.arrivals[0].progress() >= last, "progress must rise");
+            last = g.arrivals[0].progress();
+            g.step(idle());
+            if !g.arrivals.is_empty() {
+                marked_ticks += 1;
+            }
+        }
+        let expected = (SPAWN_WARNING / DT).round() as i32;
+        assert!(
+            (marked_ticks - expected).abs() <= 1,
+            "marked for {marked_ticks} ticks, expected ~{expected}"
+        );
+
+        // Each clerk surfaces exactly where it was marked, still emerging and harmless.
+        assert_eq!(g.enemies.len(), marks.len());
+        for (e, m) in g.enemies.iter().zip(&marks) {
+            assert!((e.pos - *m).len() < 1e-6, "{:?} vs {:?}", e.pos, m);
+            assert!(e.emerging);
+        }
+        while g.enemies.iter().any(|e| e.emerging) {
+            assert!(g.enemies.iter().all(|e| e.windup == 0.0));
+            assert_eq!(g.player.hp, PLAYER_HP);
+            g.step(idle());
+        }
+    }
+
+    #[test]
+    fn chamber_cleanup_and_restart_clear_marked_arrivals() {
+        let mut g = Game::new(23);
+        g.start();
+        until_marked(&mut g);
+        // Leaving the chamber while a wave is still marked drops it.
+        g.phase = Phase::Choice;
+        g.choose(0);
+        assert!(g.arrivals.is_empty());
+        assert!(g.enemies.is_empty());
+        until_marked(&mut g);
+        let kinds: Vec<EnemyKind> = g.arrivals.iter().map(|a| a.kind).collect();
+        assert_eq!(
+            kinds,
+            wave_kinds(2, 0),
+            "next chamber starts from its first wave"
+        );
+
+        g.start();
+        assert!(g.arrivals.is_empty());
+    }
+
+    fn press(strike: bool, cast: bool, dash: bool) -> Input {
+        Input {
+            aim: Vec2::new(2.0, 1.0),
+            strike,
+            cast,
+            dash,
+            ..idle()
+        }
+    }
+
+    /// Scripted play used to compare runs: wandering, chaining strikes,
+    /// casting and dashing.
+    fn scripted(t: usize) -> Input {
+        let f = t as f32 * 0.05;
+        Input {
+            movement: Vec2::new(f.cos(), f.sin()),
+            aim: Vec2::new(2.0, 1.0),
+            strike: t % 7 < 3,
+            cast: t % 50 == 0,
+            dash: t % 120 == 0,
+        }
+    }
+
+    fn fingerprint(g: &Game) -> String {
+        let foes: Vec<_> = g.enemies.iter().map(|e| (e.kind, e.pos, e.hp)).collect();
+        let shots: Vec<_> = g.shots.iter().map(|s| s.pos).collect();
+        format!(
+            "{:?} {:?} {} {} {} {} {:?} {:?} {:?} {:?}",
+            g.phase,
+            g.player.pos,
+            g.player.hp,
+            g.time,
+            g.kills,
+            g.chamber,
+            foes,
+            shots,
+            g.choices,
+            g.rng
+        )
+    }
+
+    /// Finish a drill with wandering play, then run the script.
+    fn after_drill(g: &mut Game) -> String {
+        let mut t = 0;
+        while g.lesson.is_some() {
+            assert!(t < 2_000, "drill did not finish");
+            let mut input = scripted(t + 3);
+            input.dash = t % 70 == 0;
+            input.cast = t % 40 == 0;
+            g.step(input);
+            assert!(g.enemies.is_empty() && g.pending.is_empty() && g.arrivals.is_empty());
+            t += 1;
+        }
+        for t in 0..1_500 {
+            g.step(scripted(t));
+        }
+        fingerprint(g)
+    }
+
+    #[test]
+    fn drill_advances_only_on_the_requested_action() {
+        let mut g = Game::new(9);
+        g.start_drill();
+        assert_eq!(g.lesson, Some(Lesson::Strike));
+        g.step(press(false, true, false));
+        g.step(press(false, false, true));
+        assert_eq!(
+            g.lesson,
+            Some(Lesson::Strike),
+            "cast and dash do not teach strike"
+        );
+        // The engine ignores strikes mid-dash, so let the dash finish.
+        for _ in 0..12 {
+            g.step(idle());
+        }
+        g.step(press(true, false, false));
+        assert_eq!(g.lesson, Some(Lesson::Cast));
+        // Let the earlier cast recharge, then a strike still does not count.
+        for _ in 0..60 {
+            g.step(idle());
+        }
+        g.step(press(true, false, false));
+        assert_eq!(g.lesson, Some(Lesson::Cast));
+        g.step(press(false, true, false));
+        assert_eq!(g.lesson, Some(Lesson::Dash));
+        // The dash from the first tick has recharged; this fresh press counts.
+        g.step(press(false, false, true));
+        assert_eq!(g.lesson, Some(Lesson::Complete));
+        assert_eq!(Lesson::Complete.done(), Lesson::STEPS.len());
+
+        // Waves hold for the closing beat, then the run proper begins.
+        let mut beat = 0;
+        while g.lesson.is_some() {
+            assert!(g.enemies.is_empty());
+            g.step(idle());
+            beat += 1;
+        }
+        assert!(
+            (55..=65).contains(&beat),
+            "closing beat lasted {beat} ticks"
+        );
+        assert_eq!(g.time, 0.0);
+        assert_eq!(g.player.pos, Vec2::ZERO);
+        let mut spawned = false;
+        for _ in 0..120 {
+            g.step(idle());
+            spawned |= !g.enemies.is_empty();
+        }
+        assert!(spawned, "first wave arrives once the drill is over");
+    }
+
+    #[test]
+    fn drill_skip_and_replay_never_change_the_seeded_run() {
+        let plain = {
+            let mut g = Game::new(77);
+            g.start();
+            for t in 0..1_500 {
+                g.step(scripted(t));
+            }
+            fingerprint(&g)
+        };
+
+        let mut drilled = Game::new(77);
+        drilled.start_drill();
+        assert_eq!(after_drill(&mut drilled), plain, "completing the drill");
+
+        let mut skipped = Game::new(77);
+        skipped.start_drill();
+        for t in 0..40 {
+            skipped.step(scripted(t));
+        }
+        skipped.skip_drill();
+        assert_eq!(skipped.lesson, None);
+        for t in 0..1_500 {
+            skipped.step(scripted(t));
+        }
+        assert_eq!(fingerprint(&skipped), plain, "skipping part-way");
+
+        // A replayed drill on the next run matches that run started directly.
+        let second = {
+            let mut g = Game::new(77);
+            g.start();
+            g.start();
+            for t in 0..1_500 {
+                g.step(scripted(t));
+            }
+            fingerprint(&g)
+        };
+        drilled.start_drill();
+        assert_eq!(after_drill(&mut drilled), second, "replaying the drill");
+        assert_ne!(second, plain);
     }
 
     #[test]
