@@ -32,50 +32,60 @@ def banker_lamp(M, x, y, z):
     light("POINT", (x, y - 0.16, z + 0.43), 12, (1.0, 0.71, 0.37), 0.15).visible_glossy = False
 
 
+# The desk is a squat 0.8x so the crest sits low enough, and left of centre, to
+# stay clear of the HUD cards that cover the top of the window (boss bar top
+# centre, location and telemetry cards top right).
+K = 0.8
+TOP = 1.21 * K
+
+
 def desk(M):
     # Twin stepped pedestals, separated by a real knee opening under the apron.
     for x in (-1.64, 2.28):
-        box((x, 4.84, 0.055), (1.28, 1.24, 0.23), M["walnut"], bev=0.045, name="desk_plinth")
-        box((x, 4.86, 0.55), (1.14, 1.14, 0.78), M["lacquer"], bev=0.045, name="desk_pedestal")
+        box((x, 4.84, 0.055 * K), (1.28, 1.24, 0.23 * K), M["walnut"], bev=0.045, name="desk_plinth")
+        box((x, 4.86, 0.55 * K), (1.14, 1.14, 0.78 * K), M["lacquer"], bev=0.045, name="desk_pedestal")
         for z in (0.36, 0.70):
-            box((x, 4.275, z), (0.94, 0.065, 0.30), M["veneer"], bev=0.035, name="drawer_front")
-            box((x, 4.237, z + 0.025), (0.33, 0.05, 0.065), M["brass_d"], bev=0.024, name="drawer_pull")
-    box((0.32, 5.20, 0.72), (3.06, 0.17, 0.57), M["lacquer"], bev=0.04, name="modesty_panel")
-    box((0.32, 4.91, 0.96), (5.14, 1.16, 0.19), M["walnut"], bev=0.035, name="desk_apron")
-    box((0.32, 4.88, 1.055), (5.28, 1.25, 0.05), M["brass_d"], bev=0.013, name="desk_stringing")
-    box((0.32, 4.88, 1.14), (5.34, 1.30, 0.14), M["veneer"], bev=0.047, name="writing_top")
-    box((0.16, 4.73, 1.218), (2.36, 0.78, 0.024), M["leather"], bev=0.01, name="writing_blotter")
+            box((x, 4.275, z * K), (0.94, 0.065, 0.30 * K), M["veneer"], bev=0.035, name="drawer_front")
+            box((x, 4.237, (z + 0.025) * K), (0.33, 0.05, 0.065), M["brass_d"], bev=0.024, name="drawer_pull")
+    box((0.32, 5.20, 0.72 * K), (3.06, 0.17, 0.57 * K), M["lacquer"], bev=0.04, name="modesty_panel")
+    box((0.32, 4.91, 0.96 * K), (5.14, 1.16, 0.19 * K), M["walnut"], bev=0.035, name="desk_apron")
+    box((0.32, 4.88, 1.055 * K), (5.28, 1.25, 0.05 * K), M["brass_d"], bev=0.013, name="desk_stringing")
+    box((0.32, 4.88, 1.14 * K), (5.34, 1.30, 0.14 * K), M["veneer"], bev=0.047, name="writing_top")
+    box((0.16, 4.73, TOP + 0.008), (2.36, 0.78, 0.024), M["leather"], bev=0.01, name="writing_blotter")
 
-    # Low shoulders leave the lamps free to break the skyline. The broad,
-    # off-centre high bay carries the seal instead of repeating a wall of cubbies.
-    for x0, x1, top in ((-0.84, -0.36, 1.65), (-0.36, 0.10, 1.98),
-                        (0.10, 1.96, 2.54), (1.96, 2.29, 1.87)):
-        box(((x0 + x1) / 2, 5.35, (1.21 + top) / 2),
-            (x1 - x0, 0.24, top - 1.21), M["lacquer"], name="stepped_escutcheon")
+    # Low shoulders leave the lamps free to break the skyline. The high bay sits
+    # left of centre and carries the seal instead of repeating a wall of cubbies.
+    for x0, x1, rise in ((-1.88, -1.40, 0.30), (-1.40, -0.25, 0.81),
+                         (-0.25, 0.20, 0.50), (0.20, 0.62, 0.30)):
+        top = TOP + rise
+        box(((x0 + x1) / 2, 5.35, (TOP + top) / 2),
+            (x1 - x0, 0.24, rise), M["lacquer"], name="stepped_escutcheon")
         box(((x0 + x1) / 2, 5.35, top + 0.035), (x1 - x0 + 0.05, 0.29, 0.07),
             M["veneer"], bev=0.02, name="escutcheon_coping")
-    box((1.03, 5.35, 2.675), (1.39, 0.24, 0.13), M["walnut"], bev=0.035, name="crest_crown")
-    box((1.03, 5.35, 2.77), (0.87, 0.21, 0.07), M["brass_d"], bev=0.02, name="crest_cap")
+    bay_top = TOP + 0.81 + 0.07
+    ex = -0.825
+    box((ex, 5.35, bay_top + 0.065), (0.95, 0.24, 0.13), M["walnut"], bev=0.035, name="crest_crown")
+    box((ex, 5.35, bay_top + 0.165), (0.62, 0.21, 0.07), M["brass_d"], bev=0.02, name="crest_cap")
 
-    # Broad brass letter with a dark chased fold, two ribbon ends and a red wax boss.
-    ex, y, ez = 1.03, 5.17, 2.03
-    box((ex, y + 0.035, ez), (1.44, 0.08, 0.76), M["brass_d"], bev=0.035, name="letter_reveal")
-    box((ex, y - 0.012, ez), (1.32, 0.04, 0.65), M["brass"], bev=0.018, name="brass_envelope")
+    # Brass letter with a dark chased fold, two ribbon ends and a red wax boss.
+    y, ez = 5.17, 1.41
+    box((ex, y + 0.035, ez), (1.0, 0.08, 0.58), M["brass_d"], bev=0.03, name="letter_reveal")
+    box((ex, y - 0.012, ez), (0.92, 0.04, 0.49), M["brass"], bev=0.016, name="brass_envelope")
     for side in (-1, 1):
-        beam((ex + side * 0.63, y - 0.04, ez + 0.295), (ex, y - 0.04, ez - 0.06),
-             0.028, M["walnut"], seg=8, name="engraved_fold")
-        box((ex + side * 0.07, y - 0.059, ez - 0.21), (0.095, 0.026, 0.28),
+        beam((ex + side * 0.44, y - 0.04, ez + 0.225), (ex, y - 0.04, ez - 0.045),
+             0.024, M["walnut"], seg=8, name="engraved_fold")
+        box((ex + side * 0.055, y - 0.059, ez - 0.16), (0.08, 0.026, 0.21),
             M["wax_d"], rot=(0, -side * 0.30, 0), name="seal_ribbon")
-    sph((ex, y - 0.081, ez - 0.06), 0.15, M["wax"], scale=(1.0, 0.40, 0.94), seg=16, name="wax_seal")
+    sph((ex, y - 0.081, ez - 0.045), 0.12, M["wax"], scale=(1.0, 0.40, 0.94), seg=16, name="wax_seal")
 
     for x in (-1.76, 2.52):
-        banker_lamp(M, x, 4.78, 1.21)
+        banker_lamp(M, x, 4.78, TOP)
     # Bound dispatch ledger: just one bright fore-edge against the dark blotter.
     ledger_turn = (0, 0, -0.15)
-    for z, width, depth, height, material in ((1.249, 0.73, 0.50, 0.04, "lacquer"),
-                                               (1.303, 0.69, 0.46, 0.07, "paper"),
-                                               (1.359, 0.73, 0.50, 0.045, "lacquer")):
-        box((-0.47, 4.70, z), (width, depth, height), M[material], rot=ledger_turn, bev=0.012, name="ledger")
+    for dz, width, depth, height, material in ((0.039, 0.73, 0.50, 0.04, "lacquer"),
+                                                (0.093, 0.69, 0.46, 0.07, "paper"),
+                                                (0.149, 0.73, 0.50, 0.045, "lacquer")):
+        box((-0.47, 4.70, TOP + dz), (width, depth, height), M[material], rot=ledger_turn, bev=0.012, name="ledger")
 
 
 def visitors_chair(M):
