@@ -1123,6 +1123,16 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
                 .h(px(DESIGN_H * fit.s))
                 .object_fit(ObjectFit::Fill),
         )
+        // GPUI decodes an image off-thread the first time it is laid out and
+        // draws nothing until then. Lay out the next chamber's background,
+        // hidden, so it is ready when `Game::choose` advances. In the last
+        // chamber this is the current background and costs nothing.
+        .child(
+            img(arena_image(world.chamber + 1))
+                .absolute()
+                .size_0()
+                .invisible(),
+        )
         .child(
             canvas(
                 |_, _, _| (),
