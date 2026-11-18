@@ -59,6 +59,10 @@ const INK: u32 = 0x060f12;
 
 static ARENA_IMG: LazyLock<Arc<Image>> =
     LazyLock::new(|| png(include_bytes!("../assets/arena.png")));
+static ARENA_VAULT_IMG: LazyLock<Arc<Image>> =
+    LazyLock::new(|| png(include_bytes!("../assets/arena_vault.png")));
+static ARENA_OFFICE_IMG: LazyLock<Arc<Image>> =
+    LazyLock::new(|| png(include_bytes!("../assets/arena_office.png")));
 macro_rules! sprite_frames {
     ($actor:literal, $direction:literal; $($frame:literal),+) => {
         [$(png(include_bytes!(concat!("../assets/", $actor, "/", $direction, "_", $frame, ".png")))),+]
@@ -123,8 +127,14 @@ fn png(bytes: &'static [u8]) -> Arc<Image> {
     Arc::new(Image::from_bytes(ImageFormat::Png, bytes.to_vec()))
 }
 
-fn arena_image() -> Arc<Image> {
-    ARENA_IMG.clone()
+/// Chamber background, matching `engine::chamber_name`: anything past the
+/// Vault is the Postmaster's Office.
+fn arena_image(chamber: usize) -> Arc<Image> {
+    match chamber {
+        1 => ARENA_IMG.clone(),
+        2 => ARENA_VAULT_IMG.clone(),
+        _ => ARENA_OFFICE_IMG.clone(),
+    }
 }
 fn courier_image(player: &crate::engine::Player) -> Arc<Image> {
     let (facing, frame) = if let Some((dir, progress)) = player.dash_pose() {
@@ -1105,13 +1115,23 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         .overflow_hidden()
         .bg(rgb(INK))
         .child(
-            img(arena_image())
+            img(arena_image(world.chamber))
                 .absolute()
                 .left(px(fit.ox))
                 .top(px(fit.oy))
                 .w(px(DESIGN_W * fit.s))
                 .h(px(DESIGN_H * fit.s))
                 .object_fit(ObjectFit::Fill),
+        )
+        // GPUI decodes an image off-thread the first time it is laid out and
+        // draws nothing until then. Lay out the next chamber's background,
+        // hidden, so it is ready when `Game::choose` advances. In the last
+        // chamber this is the current background and costs nothing.
+        .child(
+            img(arena_image(world.chamber + 1))
+                .absolute()
+                .size_0()
+                .invisible(),
         )
         .child(
             canvas(
