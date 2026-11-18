@@ -29,6 +29,8 @@ const LULL: f32 = 0.9;
 /// Seconds a wave clerk's entry point is marked before it starts to emerge.
 pub const SPAWN_WARNING: f32 = 0.9;
 const HEAL_BETWEEN_CHAMBERS: f32 = 25.0;
+/// Seconds the finished drill stays on screen before the run begins.
+const DRILL_OUTRO: f32 = 1.0;
 
 const S_MOVE: u8 = 0;
 const S_WIND: u8 = 1;
@@ -173,6 +175,40 @@ pub enum EffectKind {
     Dash,
     Hit,
     Burst,
+}
+
+/// Steps of the opening drill. Each advances when the engine performs that
+/// action, whichever input scheme asked for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lesson {
+    Strike,
+    Cast,
+    Dash,
+    /// All three practised; the run begins after a short beat.
+    Complete,
+}
+
+impl Lesson {
+    /// Practised steps, in order.
+    pub const STEPS: [Lesson; 3] = [Lesson::Strike, Lesson::Cast, Lesson::Dash];
+
+    /// How many steps are already done.
+    pub fn done(self) -> usize {
+        match self {
+            Lesson::Strike => 0,
+            Lesson::Cast => 1,
+            Lesson::Dash => 2,
+            Lesson::Complete => 3,
+        }
+    }
+
+    fn next(self) -> Option<Lesson> {
+        match self {
+            Lesson::Strike => Some(Lesson::Cast),
+            Lesson::Cast => Some(Lesson::Dash),
+            Lesson::Dash | Lesson::Complete => Some(Lesson::Complete),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -443,6 +479,9 @@ pub struct Game {
     pub seal_count: u32,
     pub choices: [Boon; 3],
     pub mods: Mods,
+    /// The opening drill's current step; `None` once the run proper is under way.
+    pub lesson: Option<Lesson>,
+    drill_outro: f32,
     owned: u16,
     seed: u64,
     run: u64,
@@ -497,6 +536,8 @@ impl Game {
                 Boon::RegisteredMail,
             ],
             mods: Mods::default(),
+            lesson: None,
+            drill_outro: 0.0,
             owned: 0,
             seed,
             run: 0,
@@ -527,6 +568,29 @@ impl Game {
     /// Begin (or restart) a run at chamber 1.
     pub fn start(&mut self) {
         self.run += 1;
+        self.lesson = None;
+        self.fresh_floor();
+    }
+
+    /// Begin a run with the opening drill on the Sorting Floor. Waves hold
+    /// until the drill is completed or skipped.
+    pub fn start_drill(&mut self) {
+        self.start();
+        self.lesson = Some(Lesson::Strike);
+        self.drill_outro = DRILL_OUTRO;
+    }
+
+    /// End the drill now; the run then plays out exactly as from `start`.
+    pub fn skip_drill(&mut self) {
+        if self.lesson.is_some() && self.phase == Phase::Combat {
+            self.lesson = None;
+            self.fresh_floor();
+        }
+    }
+
+    /// Reset everything a run depends on for the current `run` number. Nothing
+    /// done before this (such as the drill) can change what follows.
+    fn fresh_floor(&mut self) {
         self.reseed();
         self.phase = Phase::Combat;
         self.chamber = 1;
@@ -547,6 +611,14 @@ impl Game {
         self.live = 0;
         self.prev_dash = false;
         self.dash_stamp = 0;
+        self.wipe_shots = false;
+    }
+
+    /// Credit `done` toward the drill if it is the action being asked for.
+    fn practised(&mut self, done: Lesson) {
+        if self.lesson == Some(done) {
+            self.lesson = done.next();
+        }
     }
 
     fn rand(&mut self) -> f32 {
@@ -572,6 +644,16 @@ impl Game {
         if self.player.hp <= 0.0 {
             self.player.hp = 0.0;
             self.phase = Phase::Lost;
+            return;
+        }
+        if self.lesson == Some(Lesson::Complete) {
+            self.drill_outro -= DT;
+            if self.drill_outro <= 0.0 {
+                self.skip_drill();
+            }
+            return;
+        }
+        if self.lesson.is_some() {
             return;
         }
         self.advance_waves();
@@ -708,6 +790,7 @@ impl Game {
                 duration: 0.3,
                 radius: 0.7,
             });
+            self.practised(Lesson::Dash);
         }
 
         if self.player.dash_time > 0.0 {
@@ -819,6 +902,7 @@ impl Game {
                 });
             }
         }
+        self.practised(Lesson::Strike);
     }
 
     fn do_cast(&mut self) {
@@ -836,6 +920,7 @@ impl Game {
             pierce: self.mods.pierce,
             hit_mask: 0,
         });
+        self.practised(Lesson::Cast);
     }
 
     /// Returns true when the damage actually landed.
@@ -1773,6 +1858,159 @@ mod tests {
 
         g.start();
         assert!(g.arrivals.is_empty());
+    }
+
+    fn press(strike: bool, cast: bool, dash: bool) -> Input {
+        Input {
+            aim: Vec2::new(2.0, 1.0),
+            strike,
+            cast,
+            dash,
+            ..idle()
+        }
+    }
+
+    /// Scripted play used to compare runs: wandering, chaining strikes,
+    /// casting and dashing.
+    fn scripted(t: usize) -> Input {
+        let f = t as f32 * 0.05;
+        Input {
+            movement: Vec2::new(f.cos(), f.sin()),
+            aim: Vec2::new(2.0, 1.0),
+            strike: t % 7 < 3,
+            cast: t % 50 == 0,
+            dash: t % 120 == 0,
+        }
+    }
+
+    fn fingerprint(g: &Game) -> String {
+        let foes: Vec<_> = g.enemies.iter().map(|e| (e.kind, e.pos, e.hp)).collect();
+        let shots: Vec<_> = g.shots.iter().map(|s| s.pos).collect();
+        format!(
+            "{:?} {:?} {} {} {} {} {:?} {:?} {:?} {:?}",
+            g.phase,
+            g.player.pos,
+            g.player.hp,
+            g.time,
+            g.kills,
+            g.chamber,
+            foes,
+            shots,
+            g.choices,
+            g.rng
+        )
+    }
+
+    /// Finish a drill with wandering play, then run the script.
+    fn after_drill(g: &mut Game) -> String {
+        let mut t = 0;
+        while g.lesson.is_some() {
+            assert!(t < 2_000, "drill did not finish");
+            let mut input = scripted(t + 3);
+            input.dash = t % 70 == 0;
+            input.cast = t % 40 == 0;
+            g.step(input);
+            assert!(g.enemies.is_empty() && g.pending.is_empty() && g.arrivals.is_empty());
+            t += 1;
+        }
+        for t in 0..1_500 {
+            g.step(scripted(t));
+        }
+        fingerprint(g)
+    }
+
+    #[test]
+    fn drill_advances_only_on_the_requested_action() {
+        let mut g = Game::new(9);
+        g.start_drill();
+        assert_eq!(g.lesson, Some(Lesson::Strike));
+        g.step(press(false, true, false));
+        g.step(press(false, false, true));
+        assert_eq!(
+            g.lesson,
+            Some(Lesson::Strike),
+            "cast and dash do not teach strike"
+        );
+        // The engine ignores strikes mid-dash, so let the dash finish.
+        for _ in 0..12 {
+            g.step(idle());
+        }
+        g.step(press(true, false, false));
+        assert_eq!(g.lesson, Some(Lesson::Cast));
+        // Let the earlier cast recharge, then a strike still does not count.
+        for _ in 0..60 {
+            g.step(idle());
+        }
+        g.step(press(true, false, false));
+        assert_eq!(g.lesson, Some(Lesson::Cast));
+        g.step(press(false, true, false));
+        assert_eq!(g.lesson, Some(Lesson::Dash));
+        // The dash from the first tick has recharged; this fresh press counts.
+        g.step(press(false, false, true));
+        assert_eq!(g.lesson, Some(Lesson::Complete));
+        assert_eq!(Lesson::Complete.done(), Lesson::STEPS.len());
+
+        // Waves hold for the closing beat, then the run proper begins.
+        let mut beat = 0;
+        while g.lesson.is_some() {
+            assert!(g.enemies.is_empty());
+            g.step(idle());
+            beat += 1;
+        }
+        assert!(
+            (55..=65).contains(&beat),
+            "closing beat lasted {beat} ticks"
+        );
+        assert_eq!(g.time, 0.0);
+        assert_eq!(g.player.pos, Vec2::ZERO);
+        let mut spawned = false;
+        for _ in 0..120 {
+            g.step(idle());
+            spawned |= !g.enemies.is_empty();
+        }
+        assert!(spawned, "first wave arrives once the drill is over");
+    }
+
+    #[test]
+    fn drill_skip_and_replay_never_change_the_seeded_run() {
+        let plain = {
+            let mut g = Game::new(77);
+            g.start();
+            for t in 0..1_500 {
+                g.step(scripted(t));
+            }
+            fingerprint(&g)
+        };
+
+        let mut drilled = Game::new(77);
+        drilled.start_drill();
+        assert_eq!(after_drill(&mut drilled), plain, "completing the drill");
+
+        let mut skipped = Game::new(77);
+        skipped.start_drill();
+        for t in 0..40 {
+            skipped.step(scripted(t));
+        }
+        skipped.skip_drill();
+        assert_eq!(skipped.lesson, None);
+        for t in 0..1_500 {
+            skipped.step(scripted(t));
+        }
+        assert_eq!(fingerprint(&skipped), plain, "skipping part-way");
+
+        // A replayed drill on the next run matches that run started directly.
+        let second = {
+            let mut g = Game::new(77);
+            g.start();
+            g.start();
+            for t in 0..1_500 {
+                g.step(scripted(t));
+            }
+            fingerprint(&g)
+        };
+        drilled.start_drill();
+        assert_eq!(after_drill(&mut drilled), second, "replaying the drill");
+        assert_ne!(second, plain);
     }
 
     #[test]
