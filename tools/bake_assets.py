@@ -340,8 +340,10 @@ def arena_base(M, rnd):
 
 
 def arena_sorting(M, rnd):
-    """Sorting Floor only: inscriptions, markings and back/front props."""
-        # stencilled hull numbers
+    """Sorting Floor only: inscriptions, markings, back/front props and its five
+    point lights (three lamp posts, two machinery glows). The Vault and Office
+    are lit by the shared suns in arena_backdrop plus their own lights."""
+    # stencilled hull numbers
     for t in range(-3, 4, 2):
         text((4.24, t * 1.1, -0.45), "%02d" % (t + 4), 0.22, M["sulfur"], rotz=math.pi / 2, extrude=0.004).rotation_euler = (math.pi / 2, 0, math.pi / 2)
         text((t * 1.1, -4.24, -0.45), "DL-%d" % (t + 4), 0.2, M["pearl"], extrude=0.004).rotation_euler = (math.pi / 2, 0, 0)
@@ -772,19 +774,18 @@ def arena_scene(engine):
 
 def bake_arena(engine):
     import runpy
-    # Sorting Floor: original draw order (floor, sorting props, backdrop)
-    M = arena_scene(engine)
-    rnd = random.Random(7)
-    arena_base(M, rnd)
-    arena_sorting(M, rnd)
-    arena_under(M)
-    arena_backdrop(M, rnd)
-    render(os.path.join(OUT, "arena.png"))
-    for name, out in (("arena_vault", "arena_vault.png"), ("arena_office", "arena_office.png")):
+    tools = os.path.join(ROOT, "tools")
+    # Sorting Floor keeps its original draw order (floor, sorting props, backdrop)
+    chambers = (
+        ("arena.png", arena_sorting),
+        ("arena_vault.png", lambda M, rnd: runpy.run_path(os.path.join(tools, "arena_vault.py"), init_globals=globals())["build"](M)),
+        ("arena_office.png", lambda M, rnd: runpy.run_path(os.path.join(tools, "arena_office.py"), init_globals=globals())["build"](M)),
+    )
+    for out, chamber in chambers:
         M = arena_scene(engine)
         rnd = random.Random(7)
         arena_base(M, rnd)
-        runpy.run_path(os.path.join(ROOT, "tools", name + ".py"), init_globals=globals())["build"](M)
+        chamber(M, rnd)
         arena_under(M)
         arena_backdrop(M, rnd)
         render(os.path.join(OUT, out))

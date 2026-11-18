@@ -1,5 +1,5 @@
-"""Dead Letter Vault landmarks. The arena baker owns the floor, water and lights."""
-import math
+"""Dead Letter Vault landmarks and lights. bake_assets.py injects its globals (math,
+bpy and the primitive helpers); the shared floor and key suns come from the arena baker."""
 
 
 def _vault_door(M):
