@@ -53,7 +53,7 @@ To publish, update the package version in Cargo.toml and Cargo.lock, merge the t
 | [src/main.rs](src/main.rs) | Hosts the GPUI window. Translates key and mouse events into game inputs, drives the fixed-step clock, and draws the full-screen HUD and menus. |
 | [src/scene.rs](src/scene.rs) | Projects world positions onto the arena, maps cursor positions back to the ground, selects sprite frames, and layers actors, attack warnings and effects. |
 | [assets/](assets/) | Contains the baked chamber backgrounds, directional animation frames, character stills and editable Blender character scenes. |
-| [tools/](tools/) | Contains the procedural Blender bake driver and actor-specific rigging and animation code. |
+| [tools/](tools/) | Contains the procedural Blender bake driver, the Dead Letter Vault and Postmaster’s Office landmark scripts, and actor-specific rigging and animation code. |
 
 ## Rebuild the artwork
 
