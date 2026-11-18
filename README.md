@@ -17,12 +17,14 @@ Extract `dead-letter-windows-x64.zip` and launch `dead-letter.exe`. If you have 
 | 1, 2, 3 or click an endorsement | Choose an upgrade between chambers |
 | Esc | Pause or resume combat. Losing window focus also pauses combat. |
 | Enter or R | Start a fresh run after victory or defeat |
+| Tab or click Skip drill | Skip the opening drill |
+| T on the title or results screen | Start a run that opens with the drill |
 
 For keyboard-only play, J and K aim in the movement direction, or along the courier’s last facing when standing still. Move the mouse to return to pointer aiming.
 
 ## A delivery from start to finish
 
-1. **Sorting Floor.** Clear two waves. Bailiffs wind up before lunging, giving you time to sidestep or dash. Censors introduce ranged fire in the second wave.
+1. **Sorting Floor.** The first delivery of a session opens with a short drill: strike, cast, then dash, each prompted at the bottom of the screen. Waves hold until the drill ends, and finishing or skipping it leaves the seeded run unchanged. Then clear two waves. Bailiffs wind up before lunging, giving you time to sidestep or dash. Censors introduce ranged fire in the second wave.
 2. **Dead Letter Vault.** Clear three waves of mixed clerks. After each of the first two chambers, pick one of three endorsements. The choice applies for the run, and entering the next chamber restores 25 HP up to your maximum.
 3. **Postmaster’s Office.** Face the Postmaster. At half health the boss briefly becomes invulnerable and begins its second shift. Watch the floor markings for charge lanes and projectile patterns.
 

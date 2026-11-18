@@ -258,6 +258,7 @@ struct Foe {
     flash: f32,
     attack: u8,
     phase2: bool,
+    emerging: bool,
     radius: f32,
     ring_offset: f32,
     /// Progress of the half-hull stagger that ends in a shockwave ring.
@@ -276,10 +277,19 @@ fn foe(e: &Enemy) -> Foe {
         flash: e.flash,
         attack: e.attack,
         phase2: e.phase2,
+        emerging: e.emerging,
         radius: e.radius(),
         ring_offset: e.ring_offset(),
         shock: e.shockwave(),
     }
+}
+
+/// A marked wave entry point.
+#[derive(Clone, Copy)]
+struct Mark {
+    pos: Vec2,
+    radius: f32,
+    progress: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -328,6 +338,7 @@ struct Snapshot {
     time: f32,
     hero: Hero,
     foes: Vec<Foe>,
+    marks: Vec<Mark>,
     bolts: Vec<Bolt>,
     fx: Vec<Fx>,
     aim: Option<Vec2>,
@@ -579,6 +590,16 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
     }
     for f in &snap.foes {
         pen.shadow(f.pos, f.kind.shadow(), 1.0);
+    }
+
+    // Wave entry points: brass postmarks (never wax-red, which means "attack")
+    // that close in as the clerk is about to surface, then hold under it while
+    // it emerges and cannot yet act.
+    for m in &snap.marks {
+        entry_mark(&mut pen, m.pos, m.radius, m.progress, t);
+    }
+    for f in snap.foes.iter().filter(|f| f.emerging) {
+        entry_mark(&mut pen, f.pos, f.radius, 1.0, t);
     }
 
     // Enemy telegraphs. Each attack family has its own shape and motion cue so
@@ -1016,6 +1037,15 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         flash: world.player.flash,
     };
     let foes: Vec<Foe> = world.enemies.iter().map(foe).collect();
+    let marks: Vec<Mark> = world
+        .arrivals
+        .iter()
+        .map(|a| Mark {
+            pos: a.pos,
+            radius: a.kind.radius(),
+            progress: a.progress(),
+        })
+        .collect();
     let bolts: Vec<Bolt> = world
         .shots
         .iter()
@@ -1059,6 +1089,7 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         time,
         hero,
         foes: foes.clone(),
+        marks,
         bolts: bolts.clone(),
         fx: fx.clone(),
         aim,
@@ -1162,6 +1193,58 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         root = root.child(div().absolute().size_full().bg(col(TEAL_DEEP, 0.35)));
     }
     root
+}
+
+/// Wave entry postmark: a pearl ring sized to the clerk, a brass sweep that
+/// completes as it surfaces, and four ticks that close onto the ring.
+fn entry_mark(pen: &mut Pen, c: Vec2, body: f32, progress: f32, t: f32) {
+    let p = progress.clamp(0.0, 1.0);
+    let r = body + 0.3;
+    let pulse = 0.5 + 0.5 * (t * 9.0).sin();
+    pen.arc(
+        c,
+        0.0,
+        r * (0.35 + 0.65 * p),
+        0.0,
+        TAU,
+        0.0,
+        Some(col(BRASS, 0.08 + 0.14 * p)),
+        None,
+    );
+    pen.arc(
+        c,
+        0.0,
+        r,
+        0.0,
+        TAU,
+        0.0,
+        None,
+        Some((1.3, col(PEARL, 0.35 + 0.25 * pulse))),
+    );
+    pen.arc_line(
+        c,
+        r,
+        -PI * 0.5,
+        -PI * 0.5 + TAU * p.max(0.02),
+        0.0,
+        2.4,
+        col(BRASS, 0.9),
+    );
+    let gap = 0.08 + 0.35 * (1.0 - p);
+    for k in 0..4 {
+        let a = PI * 0.25 + k as f32 * PI * 0.5;
+        let (dx, dy) = (a.cos(), a.sin());
+        pen.line(
+            (c.x + dx * (r + gap), c.y + dy * (r + gap), 0.0),
+            (
+                c.x + dx * (r + gap + 0.22),
+                c.y + dy * (r + gap + 0.22),
+                0.0,
+            ),
+            2.0,
+            col(BRASS, 0.85),
+        );
+    }
 }
 
 // ------------------------------------------------------------- telegraphs ---

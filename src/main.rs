@@ -17,7 +17,7 @@ use gpui::{
     Window, WindowBounds, WindowOptions,
 };
 
-use engine::{Boon, EnemyKind, Game, Input, Phase, Vec2, CHAMBERS};
+use engine::{Boon, EnemyKind, Game, Input, Lesson, Phase, Vec2, CHAMBERS};
 
 // ---------------------------------------------------------------- palette ---
 const INK: u32 = 0x060f12; // abyss slate matching outer arena water
@@ -92,6 +92,8 @@ struct Shell {
     acc: f32,
     viewport: (f32, f32),
     boons: Vec<Boon>,
+    /// The opening drill has run (or been skipped) this session.
+    drilled: bool,
     _loop: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -152,6 +154,7 @@ impl Shell {
             acc: 0.0,
             viewport: (1280.0, 800.0),
             boons: Vec::new(),
+            drilled: false,
             _loop: task,
             _subs: subs,
         }
@@ -166,14 +169,32 @@ impl Shell {
         }
     }
 
-    fn restart(&mut self) {
-        self.seed = self.seed.wrapping_add(0x9E37_79B9_7F4A_7C15) ^ clock_seed();
-        self.game = Game::new(self.seed);
-        self.game.start();
-        self.boons.clear();
-        self.paused = false;
+    /// Leave the title screen. The session's first dispatch opens with the drill.
+    fn dispatch(&mut self, drill: bool) {
+        if drill || !self.drilled {
+            self.game.start_drill();
+        } else {
+            self.game.start();
+        }
+        self.drilled = true;
         self.acc = 0.0;
         self.latch = Latch::default();
+    }
+
+    fn restart(&mut self, drill: bool) {
+        self.seed = self.seed.wrapping_add(0x9E37_79B9_7F4A_7C15) ^ clock_seed();
+        self.game = Game::new(self.seed);
+        self.boons.clear();
+        self.paused = false;
+        self.dispatch(drill);
+    }
+
+    fn skip_drill(&mut self) {
+        if self.game.lesson.is_some() {
+            self.game.skip_drill();
+            self.latch = Latch::default();
+            self.acc = 0.0;
+        }
     }
 
     fn pick(&mut self, index: usize) {
@@ -275,14 +296,20 @@ impl Shell {
                 }
             }
             "space" if fresh => match self.game.phase {
-                Phase::Ready => self.game.start(),
+                Phase::Ready => self.dispatch(false),
                 Phase::Combat if !self.paused => self.latch.dash = true,
                 _ => {}
             },
             "enter" if fresh => match self.game.phase {
-                Phase::Ready => self.game.start(),
-                Phase::Won | Phase::Lost => self.restart(),
+                Phase::Ready => self.dispatch(false),
+                Phase::Won | Phase::Lost => self.restart(false),
                 Phase::Combat if self.paused => self.resume(),
+                _ => {}
+            },
+            "tab" if fresh && self.live() => self.skip_drill(),
+            "t" if fresh => match self.game.phase {
+                Phase::Ready => self.dispatch(true),
+                Phase::Won | Phase::Lost => self.restart(true),
                 _ => {}
             },
             "escape" if fresh => {
@@ -296,7 +323,7 @@ impl Shell {
             }
             "r" if fresh => {
                 if matches!(self.game.phase, Phase::Won | Phase::Lost) {
-                    self.restart();
+                    self.restart(false);
                 }
             }
             "1" if fresh => self.pick(0),
@@ -341,7 +368,7 @@ impl Shell {
                 _ => {}
             }
         } else if self.game.phase == Phase::Ready && e.button == MouseButton::Left {
-            self.game.start();
+            self.dispatch(false);
         } else if self.paused && e.button == MouseButton::Left {
             self.resume();
         }
@@ -527,6 +554,7 @@ impl Render for Shell {
             .child(self.hud_top_left())
             .children(self.hud_boss())
             .child(self.hud_top_right())
+            .children(self.hud_drill(cx))
             .children(self.overlay(m, cx))
             .when(self.paused || self.game.phase == Phase::Ready, |root| {
                 root.child(self.hud_bottom_controls())
@@ -745,13 +773,15 @@ impl Shell {
     fn hud_top_right(&self) -> Div {
         let g = &self.game;
         let ch = g.chamber.max(1);
-        let hostiles = g.enemies.len();
+        // Marked entry points count: those clerks are already on their way.
+        let hostiles = g.enemies.len() + g.arrivals.len();
 
         let (phase_text, phase_color) = if self.paused {
             ("PAUSED", BRASS)
         } else {
             match g.phase {
                 Phase::Ready => ("STANDBY", GLOW),
+                Phase::Combat if g.lesson.is_some() => ("DRILL", GLOW),
                 Phase::Combat => ("UNDER TOW", WAX),
                 Phase::Choice => ("ENDORSEMENT DUE", BRASS),
                 Phase::Won => ("DELIVERED", BRASS),
@@ -853,6 +883,130 @@ impl Shell {
             .gap(px(8.0))
             .child(location_card)
             .child(telemetry_card)
+    }
+
+    /// Bottom-centre combat HUD during the opening drill: the action being
+    /// asked for, both ways to perform it, and a skip control. Progress comes
+    /// from `Game::lesson`.
+    fn hud_drill(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let lesson = self.game.lesson?;
+        if self.paused || self.game.phase != Phase::Combat {
+            return None;
+        }
+        let (title, keys, detail): (&str, &[&str], &str) = match lesson {
+            Lesson::Strike => (
+                "Strike",
+                &["LMB", "J"],
+                "Swing the franking blade toward your aim. Aim with the mouse, or turn with \
+                 WASD / arrows. Three swings in a row chain into a heavier finisher.",
+            ),
+            Lesson::Cast => (
+                "Cast",
+                &["RMB", "K"],
+                "Throw a sealed letter toward your aim. It recharges after each throw.",
+            ),
+            Lesson::Dash => (
+                "Dash",
+                &["SPACE"],
+                "Slip through danger: nothing can hurt the courier mid-dash. Dash the way you \
+                 are moving.",
+            ),
+            Lesson::Complete => (
+                "Drill complete",
+                &[],
+                "The Sorting Floor opens. Clerks inbound.",
+            ),
+        };
+
+        let mut pips = div().flex().flex_row().gap(px(4.0));
+        for i in 0..Lesson::STEPS.len() {
+            let lit = i < lesson.done();
+            let current = i == lesson.done();
+            pips = pips.child(div().w(px(18.0)).h(px(4.0)).rounded(px(2.0)).bg(if lit {
+                rgb(GLOW)
+            } else if current {
+                rgb(PEARL_DIM)
+            } else {
+                rgba(0x13282cc8)
+            }));
+        }
+
+        let mut prompt = div().flex().flex_row().items_center().gap(px(6.0));
+        for (i, key) in keys.iter().enumerate() {
+            if i > 0 {
+                prompt = prompt.child(mono("OR", 9.0, PEARL_DIM));
+            }
+            prompt = prompt.child(keycap(*key));
+        }
+
+        let skip = div()
+            .id("skip-drill")
+            .px(px(10.0))
+            .py(px(3.0))
+            .rounded(px(3.0))
+            .border_1()
+            .border_color(rgba(HUD_BORDER))
+            .cursor_pointer()
+            .hover(|s| s.border_color(rgb(GLOW)))
+            // Handle the press here, not as a click, so the arena never sees
+            // it as a strike.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus);
+                    this.skip_drill();
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(mono("TAB \u{00b7} SKIP DRILL", 9.0, PEARL_DIM));
+
+        Some(
+            div()
+                .absolute()
+                .bottom(px(28.0))
+                .left_0()
+                .w_full()
+                .flex()
+                .justify_center()
+                .child(
+                    hud_card()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(7.0))
+                        .max_w(px(460.0))
+                        .px(px(20.0))
+                        .py(px(12.0))
+                        .border_color(rgb(TEAL_HI))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(10.0))
+                                .child(
+                                    mono("OPENING DRILL", 9.0, GLOW).font_weight(FontWeight::BOLD),
+                                )
+                                .child(pips),
+                        )
+                        .child(
+                            serif(title, 24.0, PEARL)
+                                .font_weight(FontWeight::BOLD)
+                                .line_height(px(26.0)),
+                        )
+                        .when(!keys.is_empty(), |card| card.child(prompt))
+                        .child(
+                            div()
+                                .font_family(MONO)
+                                .text_size(px(11.0))
+                                .text_color(rgb(PEARL_DIM))
+                                .text_center()
+                                .child(detail),
+                        )
+                        .when(lesson != Lesson::Complete, |card| card.child(skip)),
+                ),
+        )
     }
 
     /// Bottom-center HUD: subtle BotW-style control button prompts.
@@ -1006,14 +1160,32 @@ impl Shell {
                             .child(mono("NO ADDRESS BEYOND THE TIDE", 10.0, PEARL_DIM)),
                     )
                     .child(
-                        hud_card()
-                            .px(px(20.0))
-                            .py(px(9.0))
-                            .border_color(rgb(BRASS))
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(8.0))
                             .child(
-                                mono("PRESS ENTER, SPACE OR CLICK TO DISPATCH", 11.0, PEARL)
-                                    .font_weight(FontWeight::BOLD),
-                            ),
+                                hud_card()
+                                    .px(px(20.0))
+                                    .py(px(9.0))
+                                    .border_color(rgb(BRASS))
+                                    .child(
+                                        mono(
+                                            "PRESS ENTER, SPACE OR CLICK TO DISPATCH",
+                                            11.0,
+                                            PEARL,
+                                        )
+                                        .font_weight(FontWeight::BOLD),
+                                    ),
+                            )
+                            .child(mono(
+                                // The title screen only shows before the session's first
+                                // dispatch, which always opens with the drill.
+                                "A SHORT DRILL OPENS THE FIRST DELIVERY \u{00b7} TAB SKIPS IT",
+                                10.0,
+                                PEARL_DIM,
+                            )),
                     ),
             ),
             Phase::Choice => {
@@ -1176,13 +1348,30 @@ impl Shell {
                 .bg(rgb(color))
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _e, _w, cx| {
-                    this.restart();
+                    this.restart(false);
                     cx.notify();
                 }))
                 .child(
                     mono("ENTER / R \u{2014} SEND ANOTHER COURIER", 11.0, INK)
                         .font_weight(FontWeight::BOLD),
                 ),
+        )
+        .child(
+            div()
+                .id("drill-btn")
+                .px(px(14.0))
+                .py(px(5.0))
+                .rounded(px(4.0))
+                .bg(rgba(HUD_BG))
+                .border_1()
+                .border_color(rgba(HUD_BORDER))
+                .cursor_pointer()
+                .hover(|s| s.border_color(rgb(GLOW)))
+                .on_click(cx.listener(|this, _e, _w, cx| {
+                    this.restart(true);
+                    cx.notify();
+                }))
+                .child(mono("T \u{2014} RUN THE DRILL FIRST", 10.0, PEARL_DIM)),
         )
     }
 }
