@@ -81,7 +81,6 @@ struct Latch {
 
 struct Shell {
     game: Game,
-    seed: u64,
     focus: FocusHandle,
     held: Held,
     latch: Latch,
@@ -141,10 +140,8 @@ impl Shell {
             }
         });
 
-        let seed = clock_seed();
         Shell {
-            game: Game::new(seed),
-            seed,
+            game: Game::new(clock_seed()),
             focus,
             held: Held::default(),
             latch: Latch::default(),
@@ -182,11 +179,21 @@ impl Shell {
     }
 
     fn restart(&mut self, drill: bool) {
-        self.seed = self.seed.wrapping_add(0x9E37_79B9_7F4A_7C15) ^ clock_seed();
-        self.game = Game::new(self.seed);
+        let seed = self.game.seed().wrapping_add(0x9E37_79B9_7F4A_7C15) ^ clock_seed();
+        self.game = Game::new(seed);
         self.boons.clear();
         self.paused = false;
         self.dispatch(drill);
+    }
+
+    /// Same-seed retry of the current run, with all shell-only run state reset.
+    fn retry(&mut self) {
+        self.game.retry();
+        self.boons.clear();
+        self.paused = false;
+        self.acc = 0.0;
+        self.latch = Latch::default();
+        self.held = Held::default();
     }
 
     fn skip_drill(&mut self) {
@@ -326,6 +333,7 @@ impl Shell {
                     self.restart(false);
                 }
             }
+            "p" if fresh && matches!(self.game.phase, Phase::Won | Phase::Lost) => self.retry(),
             "1" if fresh => self.pick(0),
             "2" if fresh => self.pick(1),
             "3" if fresh => self.pick(2),
@@ -593,7 +601,7 @@ impl Shell {
     fn doc_no(&self) -> String {
         format!(
             "UT-{:04}-{}",
-            self.seed % 10_000,
+            self.game.seed() % 10_000,
             roman(self.game.chamber.max(1).min(9))
         )
     }
@@ -1320,7 +1328,7 @@ impl Shell {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(14.0))
+            .gap(px(10.0))
             .bg(rgba(0x040b0de0))
             .child(mono(badge, 10.0, color).font_weight(FontWeight::BOLD))
             .child(
@@ -1347,7 +1355,11 @@ impl Shell {
                 ),
                 11.0,
                 PEARL_DIM,
-            ));
+            ))
+            .child(
+                mono(format!("DELIVERY SEED {}", self.game.seed()), 11.0, PEARL)
+                    .font_weight(FontWeight::BOLD),
+            );
 
         if !self.boons.is_empty() {
             let mut row = div().flex().flex_row().gap(px(8.0));
@@ -1373,38 +1385,65 @@ impl Shell {
 
         card.child(
             div()
-                .id("restart-btn")
-                .mt(px(6.0))
-                .px(px(18.0))
-                .py(px(8.0))
-                .rounded(px(4.0))
-                .bg(rgb(color))
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _e, _w, cx| {
-                    this.restart(false);
-                    cx.notify();
-                }))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .mt(px(2.0))
                 .child(
-                    mono("ENTER / R \u{2014} SEND ANOTHER COURIER", 11.0, INK)
-                        .font_weight(FontWeight::BOLD),
+                    div()
+                        .id("restart-btn")
+                        .px(px(14.0))
+                        .py(px(7.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(color))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _e, _w, cx| {
+                            this.restart(false);
+                            cx.notify();
+                        }))
+                        .child(
+                            mono("ENTER / R \u{2014} FRESH RUN", 11.0, INK)
+                                .font_weight(FontWeight::BOLD),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("retry-btn")
+                        .px(px(14.0))
+                        .py(px(7.0))
+                        .rounded(px(4.0))
+                        .bg(rgba(HUD_BG))
+                        .border_1()
+                        .border_color(rgb(color))
+                        .cursor_pointer()
+                        .hover(|s| s.border_color(rgb(GLOW)))
+                        .on_click(cx.listener(|this, _e, _w, cx| {
+                            this.retry();
+                            cx.notify();
+                        }))
+                        .child(
+                            mono("P \u{2014} RETRY SAME SEED", 11.0, PEARL)
+                                .font_weight(FontWeight::BOLD),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("drill-btn")
+                        .px(px(12.0))
+                        .py(px(7.0))
+                        .rounded(px(4.0))
+                        .bg(rgba(HUD_BG))
+                        .border_1()
+                        .border_color(rgba(HUD_BORDER))
+                        .cursor_pointer()
+                        .hover(|s| s.border_color(rgb(GLOW)))
+                        .on_click(cx.listener(|this, _e, _w, cx| {
+                            this.restart(true);
+                            cx.notify();
+                        }))
+                        .child(mono("T \u{2014} DRILL FIRST", 10.0, PEARL_DIM)),
                 ),
-        )
-        .child(
-            div()
-                .id("drill-btn")
-                .px(px(14.0))
-                .py(px(5.0))
-                .rounded(px(4.0))
-                .bg(rgba(HUD_BG))
-                .border_1()
-                .border_color(rgba(HUD_BORDER))
-                .cursor_pointer()
-                .hover(|s| s.border_color(rgb(GLOW)))
-                .on_click(cx.listener(|this, _e, _w, cx| {
-                    this.restart(true);
-                    cx.notify();
-                }))
-                .child(mono("T \u{2014} RUN THE DRILL FIRST", 10.0, PEARL_DIM)),
         )
     }
 }

@@ -16,11 +16,14 @@ Extract `dead-letter-windows-x64.zip` and launch `dead-letter.exe`. If you have 
 | Space during combat | Dash with brief invulnerability |
 | 1, 2, 3 or click an endorsement | Choose an upgrade between chambers |
 | Esc | Pause or resume combat. Losing window focus also pauses combat. |
-| Enter or R | Start a fresh run after victory or defeat |
+| Enter, R or click Fresh run | Start a fresh run after victory or defeat |
+| P or click Retry same seed | Retry the finished delivery after victory or defeat |
 | Tab or click Skip drill | Skip the opening drill |
 | T on the title or results screen | Start a run that opens with the drill |
 
 For keyboard-only play, J and K aim in the movement direction, or along the courier’s last facing when standing still. Move the mouse to return to pointer aiming.
+
+The results screen shows the full delivery seed. A same-seed retry repeats the waves and endorsement offers when you use the same inputs and make the same choices.
 
 ## A delivery from start to finish
 
