@@ -127,11 +127,13 @@ fn png(bytes: &'static [u8]) -> Arc<Image> {
     Arc::new(Image::from_bytes(ImageFormat::Png, bytes.to_vec()))
 }
 
+/// Chamber background, matching `engine::chamber_name`: anything past the
+/// Vault is the Postmaster's Office.
 fn arena_image(chamber: usize) -> Arc<Image> {
     match chamber {
+        1 => ARENA_IMG.clone(),
         2 => ARENA_VAULT_IMG.clone(),
-        3 => ARENA_OFFICE_IMG.clone(),
-        _ => ARENA_IMG.clone(),
+        _ => ARENA_OFFICE_IMG.clone(),
     }
 }
 fn courier_image(player: &crate::engine::Player) -> Arc<Image> {
