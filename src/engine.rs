@@ -441,7 +441,30 @@ impl Enemy {
     fn hittable(&self) -> bool {
         self.hp > 0.0 && self.state != S_EMERGE && self.state != S_TRANS
     }
+
+    /// Angle of the first bolt in the boss ring being wound up; alternate rings
+    /// rotate by 0.2 rad so the gaps move.
+    pub fn ring_offset(&self) -> f32 {
+        if self.attack_index % 2 == 0 {
+            0.0
+        } else {
+            0.2
+        }
+    }
+
+    /// Rising 0..=1 progress of the half-hull stagger, which ends in a ring of
+    /// `SHOCKWAVE_BOLTS` bolts; 0 at any other time.
+    pub fn shockwave(&self) -> f32 {
+        if self.state == S_TRANS && self.dur > 0.0 {
+            (1.0 - self.timer / self.dur).clamp(0.02, 1.0)
+        } else {
+            0.0
+        }
+    }
 }
+
+/// Bolts in the ring that ends the Postmaster's half-hull stagger.
+pub const SHOCKWAVE_BOLTS: u32 = 14;
 
 #[derive(Clone, Debug)]
 pub struct Shot {
@@ -1179,7 +1202,7 @@ impl Game {
                     e.begin(S_MOVE, 0.0);
                     e.cd = 0.8;
                     let pos = e.pos;
-                    self.ring(pos, 14, 0.0, 4.6, 9.0);
+                    self.ring(pos, SHOCKWAVE_BOLTS, 0.0, 4.6, 9.0);
                 }
                 return;
             }
@@ -1350,7 +1373,7 @@ impl Game {
         match e.attack {
             ATT_RING => {
                 let n = if phase2 { 18 } else { 12 };
-                let off = if e.attack_index % 2 == 0 { 0.0 } else { 0.2 };
+                let off = e.ring_offset();
                 self.ring(e.pos, n, off, 4.2, 9.0);
                 e.begin(S_REC, 0.9);
             }
@@ -1496,6 +1519,62 @@ impl Game {
             self.roll_choices();
             self.phase = Phase::Choice;
         }
+    }
+}
+
+/// Hooks for tests outside this module that stage single attacks.
+#[cfg(test)]
+impl Game {
+    /// A started run whose waves never spawn.
+    pub(crate) fn quiet_arena(seed: u64) -> Game {
+        let mut g = Game::new(seed);
+        g.start();
+        g.lull = f32::INFINITY;
+        g.wave = waves_in(1);
+        g
+    }
+
+    /// Place an enemy one tick from releasing `attack` toward `dir`, with its aim
+    /// already locked. `attack_index` picks the boss ring's rotation; an
+    /// `attack` of `None` stages the end of the Postmaster's half-hull stagger.
+    pub(crate) fn stage_release(
+        &mut self,
+        kind: EnemyKind,
+        attack: Option<u8>,
+        attack_index: u32,
+        pos: Vec2,
+        dir: Vec2,
+        phase2: bool,
+    ) {
+        let mut e = self.make_enemy(kind, pos);
+        e.emerging = false;
+        e.dir = dir;
+        e.phase2 = phase2;
+        e.attack_index = attack_index;
+        match attack {
+            Some(a) => {
+                e.attack = a;
+                e.begin(S_WIND, 0.8);
+            }
+            None => e.begin(S_TRANS, 1.3),
+        }
+        e.timer = DT;
+        self.effects.clear();
+        self.enemies.push(e);
+    }
+
+    /// True while enemy `i` is still winding up or carrying out an attack.
+    pub(crate) fn attacking(&self, i: usize) -> bool {
+        matches!(self.enemies[i].state, S_WIND | S_ACT | S_TRANS)
+    }
+
+    /// Keep enemy `i` in the arena but never let it start another attack.
+    pub(crate) fn disarm(&mut self, i: usize) {
+        let e = &mut self.enemies[i];
+        if e.state != S_MOVE {
+            e.begin(S_MOVE, 0.0);
+        }
+        e.cd = f32::INFINITY;
     }
 }
 

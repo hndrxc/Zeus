@@ -15,7 +15,8 @@ use gpui::{
 };
 
 use crate::engine::{
-    EffectKind, EnemyKind, Game, Phase, Vec2, ARENA, ATT_CHARGE, ATT_FAN, ATT_RING, ATT_SUMMON,
+    EffectKind, Enemy, EnemyKind, Game, Phase, Vec2, ARENA, ATT_CHARGE, ATT_FAN, ATT_RING,
+    ATT_SUMMON, SHOCKWAVE_BOLTS,
 };
 
 const DESIGN_W: f32 = 900.0;
@@ -30,17 +31,24 @@ const FOOT_Y: f32 = 176.0;
 // reach, combo step and cooldown maxima are read live from the game).
 const STRIKE_HALF_ARC: f32 = 1.047_197_6; // acos(0.5): chain strikes 1 and 2
 const FINISHER_HALF_ARC: f32 = PI * 0.5; // acos(0.0): chain finisher
-/// Bailiff lunge: 9.5 u/s for 0.28 s plus contact (0.38 + 0.28 + 0.1).
-const BAILIFF_LUNGE: f32 = 9.5 * 0.28 + 0.76;
-const BAILIFF_HALF_WIDTH: f32 = 0.76;
-/// Censor / boss fan: bolts fly ~4.8-5 u/s for 4 s, clipped to the arena.
-const CENSOR_LANE: f32 = 8.0;
+                                         // Attack footprints are built from these; the tests below check them against
+                                         // the ticks on which the engine actually damages the courier.
+const COURIER_RADIUS: f32 = 0.28;
+/// Bailiff lunge: 9.5 u/s for 0.28 s, connecting within body + courier + 0.1.
+const BAILIFF_TRAVEL: f32 = 9.5 * 0.28;
+const BAILIFF_CONTACT: f32 = 0.38 + COURIER_RADIUS + 0.1;
+/// Boss charge: 7.5 u/s for 0.55 s or until it meets a wall.
+const BOSS_CHARGE_TRAVEL: f32 = 7.5 * 0.55;
+const BOSS_CONTACT: f32 = 0.75 + COURIER_RADIUS + 0.1;
+/// Hostile bolts hit within their own radius plus 85% of the courier's.
+const VOLLEY_HIT: f32 = 0.17 + COURIER_RADIUS * 0.85;
+const RING_HIT: f32 = 0.2 + COURIER_RADIUS * 0.85;
+/// Bolts fly until they are this far from the centre on either axis.
+const BOLT_LIMIT: f32 = ARENA + 0.6;
 const CENSOR_SPREAD: f32 = 0.32;
 const BOSS_FAN_SPREAD: f32 = 0.26;
-const BOSS_RING_LANE: f32 = 3.2;
-/// Boss charge: 7.5 u/s for 0.55 s plus contact (0.75 + 0.28 + 0.1).
-const BOSS_CHARGE: f32 = 7.5 * 0.55 + 1.13;
-const BOSS_CHARGE_HALF_WIDTH: f32 = 1.13;
+/// Radius of the boss ring's reference circle: the ring closes in from here.
+const RING_GUIDE: f32 = 3.2;
 
 const PEARL: u32 = 0xe9e4d2;
 const TEAL: u32 = 0x2fb3a2;
@@ -213,13 +221,6 @@ impl Kind {
             EnemyKind::Postmaster => Kind::Postmaster,
         }
     }
-    fn radius(self) -> f32 {
-        match self {
-            Kind::Bailiff => EnemyKind::Bailiff.radius(),
-            Kind::Censor => EnemyKind::Censor.radius(),
-            Kind::Postmaster => EnemyKind::Postmaster.radius(),
-        }
-    }
     fn shadow(self) -> f32 {
         match self {
             Kind::Bailiff => 0.52,
@@ -258,6 +259,29 @@ struct Foe {
     attack: u8,
     phase2: bool,
     emerging: bool,
+    radius: f32,
+    ring_offset: f32,
+    /// Progress of the half-hull stagger that ends in a shockwave ring.
+    shock: f32,
+}
+
+fn foe(e: &Enemy) -> Foe {
+    Foe {
+        kind: Kind::of(&e.kind),
+        frame: e.animation_frame(),
+        pos: e.pos,
+        dir: e.dir,
+        hp: e.hp,
+        max_hp: e.max_hp,
+        windup: e.windup,
+        flash: e.flash,
+        attack: e.attack,
+        phase2: e.phase2,
+        emerging: e.emerging,
+        radius: e.radius(),
+        ring_offset: e.ring_offset(),
+        shock: e.shockwave(),
+    }
 }
 
 /// A marked wave entry point.
@@ -575,115 +599,22 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
         entry_mark(&mut pen, m.pos, m.radius, m.progress, t);
     }
     for f in snap.foes.iter().filter(|f| f.emerging) {
-        entry_mark(&mut pen, f.pos, f.kind.radius(), 1.0, t);
+        entry_mark(&mut pen, f.pos, f.radius, 1.0, t);
     }
 
-    // Enemy telegraphs: wax-red, filling toward the strike moment. Shapes match
-    // what the engine does on resolution (windup is 0..=1 progress, `dir` is the
-    // locked attack direction).
-    for f in &snap.foes {
-        if f.windup <= 0.0 {
-            continue;
-        }
-        let w = f.windup.clamp(0.0, 1.0);
-        let to = norm(f.dir, Vec2::new(1.0, 0.0));
-        let ang = to.y.atan2(to.x);
-        let pulse = 0.5 + 0.5 * (t * 28.0).sin();
-        let o = f.pos;
-        match f.kind {
-            Kind::Bailiff => lane(&mut pen, o, to, BAILIFF_LUNGE, BAILIFF_HALF_WIDTH, w, pulse),
-            Kind::Censor => {
-                // Volley: one bolt, or a three-bolt fan from chamber 2.
-                let n: i32 = if snap.chamber >= 2 { 3 } else { 1 };
-                for k in 0..n {
-                    let a = ang + (k as f32 - (n - 1) as f32 * 0.5) * CENSOR_SPREAD;
-                    let end = (
-                        o.x + a.cos() * CENSOR_LANE,
-                        o.y + a.sin() * CENSOR_LANE,
-                        0.0,
-                    );
-                    let start = (o.x, o.y, 0.0);
-                    pen.line(start, end, 6.0 * (1.0 - w) + 1.2, col(WAX, 0.08 + 0.10 * w));
-                    pen.line(start, end, 1.3, col(WAX, 0.4 + 0.45 * w));
-                }
-            }
-            Kind::Postmaster => match f.attack {
-                ATT_RING => {
-                    // Radial ink burst: ring around the boss, one lane per bolt.
-                    let n = if f.phase2 { 18 } else { 12 };
-                    let reach = BOSS_RING_LANE;
-                    pen.arc(
-                        o,
-                        0.0,
-                        reach,
-                        0.0,
-                        TAU,
-                        0.0,
-                        Some(col(WAX, 0.06 + 0.06 * w)),
-                        Some((2.0, col(WAX, 0.5 + 0.3 * pulse * w))),
-                    );
-                    pen.arc(
-                        o,
-                        0.0,
-                        reach * w,
-                        0.0,
-                        TAU,
-                        0.0,
-                        Some(col(WAX, 0.22 + 0.3 * w)),
-                        None,
-                    );
-                    for k in 0..n {
-                        let a = k as f32 * TAU / n as f32;
-                        pen.line(
-                            (o.x + a.cos() * 0.9, o.y + a.sin() * 0.9, 0.0),
-                            (o.x + a.cos() * reach, o.y + a.sin() * reach, 0.0),
-                            1.1,
-                            col(WAX, 0.3 + 0.4 * w),
-                        );
-                    }
-                }
-                ATT_CHARGE => lane(
-                    &mut pen,
-                    o,
-                    to,
-                    BOSS_CHARGE,
-                    BOSS_CHARGE_HALF_WIDTH,
-                    w,
-                    pulse,
-                ),
-                ATT_FAN => {
-                    let n: i32 = if f.phase2 { 7 } else { 5 };
-                    for k in 0..n {
-                        let a = ang + (k as f32 - (n - 1) as f32 * 0.5) * BOSS_FAN_SPREAD;
-                        let end = (
-                            o.x + a.cos() * CENSOR_LANE,
-                            o.y + a.sin() * CENSOR_LANE,
-                            0.0,
-                        );
-                        let start = (o.x, o.y, 0.0);
-                        pen.line(start, end, 5.0 * (1.0 - w) + 1.0, col(WAX, 0.08 + 0.10 * w));
-                        pen.line(start, end, 1.3, col(WAX, 0.4 + 0.45 * w));
-                    }
-                }
-                ATT_SUMMON => {
-                    // Summons: wax seals open at the two flanks where clerks surface.
-                    let side = Vec2::new(-to.y, to.x);
-                    for s in [1.0f32, -1.0] {
-                        let c = Vec2::new(o.x + side.x * s * 1.6, o.y + side.y * s * 1.6);
-                        pen.arc(
-                            c,
-                            0.0,
-                            0.55 * (0.4 + 0.6 * w),
-                            0.0,
-                            TAU,
-                            0.0,
-                            Some(col(WAX, 0.15 + 0.3 * w)),
-                            Some((1.6, col(PEARL, 0.5))),
-                        );
-                    }
-                }
-                _ => {}
-            },
+    // Enemy telegraphs. Each attack family has its own shape and motion cue so
+    // they stay apart without colour. All fills go down before any outline or
+    // cue, so a crowded floor never buries one warning's edge under another's
+    // wash; within a layer the warning closest to release paints last.
+    let mut warned: Vec<(&Foe, Family)> = snap
+        .foes
+        .iter()
+        .filter_map(|f| family(f, snap.chamber).map(|fam| (f, fam)))
+        .collect();
+    warned.sort_by(|a, b| urgency(a.0).total_cmp(&urgency(b.0)));
+    for layer in [Layer::Fill, Layer::Cue] {
+        for &(f, fam) in &warned {
+            telegraph(&mut pen, f, fam, t, layer);
         }
     }
 
@@ -1051,8 +982,8 @@ fn paint_front(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
 
     // Telegraph glints above windup-ing enemies (a brass warning pip).
     for f in &snap.foes {
-        if f.windup > 0.0 {
-            let w = f.windup.clamp(0.0, 1.0);
+        let w = f.windup.max(f.shock).clamp(0.0, 1.0);
+        if w > 0.0 {
             let blink = if (t * 18.0).sin() > 0.0 { 1.0 } else { 0.55 };
             let z = f.kind.height() / 52.0 + 0.25;
             pen.disc(f.pos.x, f.pos.y, z, 3.0 + 3.0 * w, col(BRASS, 0.9 * blink));
@@ -1105,23 +1036,7 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         reach: world.mods.reach,
         flash: world.player.flash,
     };
-    let foes: Vec<Foe> = world
-        .enemies
-        .iter()
-        .map(|e| Foe {
-            kind: Kind::of(&e.kind),
-            frame: e.animation_frame(),
-            pos: e.pos,
-            dir: e.dir,
-            hp: e.hp,
-            max_hp: e.max_hp,
-            windup: e.windup,
-            flash: e.flash,
-            attack: e.attack,
-            phase2: e.phase2,
-            emerging: e.emerging,
-        })
-        .collect();
+    let foes: Vec<Foe> = world.enemies.iter().map(foe).collect();
     let marks: Vec<Mark> = world
         .arrivals
         .iter()
@@ -1332,31 +1247,637 @@ fn entry_mark(pen: &mut Pen, c: Vec2, body: f32, progress: f32, t: f32) {
     }
 }
 
-/// Lunge corridor: a wax-red lane that floods from the origin as the windup fills.
-fn lane(pen: &mut Pen, o: Vec2, dir: Vec2, len: f32, half_w: f32, w: f32, pulse: f32) {
-    let n = Vec2::new(-dir.y, dir.x);
-    let corner = |d: f32, s: f32| {
-        (
-            o.x + dir.x * d + n.x * s * half_w,
-            o.y + dir.y * d + n.y * s * half_w,
-            0.0,
+// ------------------------------------------------------------- telegraphs ---
+
+/// One attack family per distinct warning shape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Family {
+    /// Bailiff: contact lunge down a lane.
+    Lunge,
+    /// Censor: one bolt, or a three-bolt spread from chamber 2.
+    Volley { n: u32 },
+    /// Postmaster: bolts in every direction.
+    Ring { n: u32, offset: f32 },
+    /// Postmaster: wide contact charge that stops at a wall.
+    Charge,
+    /// Postmaster: a five- or seven-bolt fan.
+    Fan { n: u32 },
+    /// Postmaster: two clerks surface at its flanks (no damage of its own).
+    Summon,
+    /// Postmaster: the ring released as its half-hull stagger ends.
+    Shockwave,
+}
+
+fn family(f: &Foe, chamber: usize) -> Option<Family> {
+    if f.shock > 0.0 {
+        return Some(Family::Shockwave);
+    }
+    if f.windup <= 0.0 {
+        return None;
+    }
+    Some(match f.kind {
+        Kind::Bailiff => Family::Lunge,
+        Kind::Censor => Family::Volley {
+            n: if chamber >= 2 { 3 } else { 1 },
+        },
+        Kind::Postmaster => match f.attack {
+            ATT_RING => Family::Ring {
+                n: if f.phase2 { 18 } else { 12 },
+                offset: f.ring_offset,
+            },
+            ATT_CHARGE => Family::Charge,
+            ATT_FAN => Family::Fan {
+                n: if f.phase2 { 7 } else { 5 },
+            },
+            ATT_SUMMON => Family::Summon,
+            _ => return None,
+        },
+    })
+}
+
+fn urgency(f: &Foe) -> f32 {
+    f.windup.max(f.shock).clamp(0.0, 1.0)
+}
+
+/// Floor region an attack can damage: every courier position within `half`
+/// of the segment from `o` along unit `dir` for `len`.
+#[derive(Clone, Copy, Debug)]
+struct Zone {
+    o: Vec2,
+    dir: Vec2,
+    len: f32,
+    half: f32,
+}
+
+impl Zone {
+    /// Drawn length: bolts fly a little past the floor before they are culled,
+    /// but nothing out there can be hit, so the warning stops at the edge.
+    fn on_floor(&self) -> f32 {
+        self.len.min(exit_distance(self.o, self.dir, ARENA))
+    }
+
+    fn at(&self, s: f32, side: f32) -> Vec2 {
+        Vec2::new(
+            self.o.x + self.dir.x * s - self.dir.y * side,
+            self.o.y + self.dir.y * s + self.dir.x * side,
         )
+    }
+
+    /// Distance from `p` to the zone's centre segment.
+    #[cfg(test)]
+    fn distance(&self, p: Vec2) -> f32 {
+        let d = p - self.o;
+        let s = d.dot(self.dir).clamp(0.0, self.len);
+        (d - self.dir * s).len()
+    }
+}
+
+/// Distance along unit `d` from `o` to the edge of the square `[-h, h]^2`.
+fn exit_distance(o: Vec2, d: Vec2, h: f32) -> f32 {
+    let mut t = f32::INFINITY;
+    for (p, v) in [(o.x, d.x), (o.y, d.y)] {
+        if v > 1e-6 {
+            t = t.min((h - p) / v);
+        } else if v < -1e-6 {
+            t = t.min((-h - p) / v);
+        }
+    }
+    t.max(0.0)
+}
+
+fn bolt_zone(o: Vec2, angle: f32, half: f32) -> Zone {
+    let dir = Vec2::from_angle(angle);
+    Zone {
+        o,
+        dir,
+        len: exit_distance(o, dir, BOLT_LIMIT),
+        half,
+    }
+}
+
+fn spread(o: Vec2, base: f32, n: u32, step: f32, half: f32) -> Vec<Zone> {
+    (0..n)
+        .map(|k| bolt_zone(o, base + (k as f32 - (n - 1) as f32 * 0.5) * step, half))
+        .collect()
+}
+
+fn ring(o: Vec2, n: u32, offset: f32, half: f32) -> Vec<Zone> {
+    (0..n)
+        .map(|k| bolt_zone(o, offset + k as f32 * TAU / n as f32, half))
+        .collect()
+}
+
+/// Where the attack being wound up can damage the courier once it releases.
+fn footprint(f: &Foe, fam: Family) -> Vec<Zone> {
+    let dir = norm(f.dir, Vec2::new(1.0, 0.0));
+    let base = dir.y.atan2(dir.x);
+    // Contact attacks stop where the attacker's body meets a wall.
+    let lane = |travel: f32, contact: f32| Zone {
+        o: f.pos,
+        dir,
+        len: travel.min(exit_distance(f.pos, dir, ARENA - f.radius)),
+        half: contact,
     };
-    let quad = |d0: f32, d1: f32| {
-        [
-            corner(d0, -1.0),
-            corner(d1, -1.0),
-            corner(d1, 1.0),
-            corner(d0, 1.0),
-        ]
+    match fam {
+        Family::Lunge => vec![lane(BAILIFF_TRAVEL, BAILIFF_CONTACT)],
+        Family::Charge => vec![lane(BOSS_CHARGE_TRAVEL, BOSS_CONTACT)],
+        Family::Volley { n } => spread(f.pos, base, n, CENSOR_SPREAD, VOLLEY_HIT),
+        Family::Fan { n } => spread(f.pos, base, n, BOSS_FAN_SPREAD, VOLLEY_HIT),
+        Family::Ring { n, offset } => ring(f.pos, n, offset, RING_HIT),
+        Family::Shockwave => ring(f.pos, SHOCKWAVE_BOLTS, 0.0, RING_HIT),
+        Family::Summon => Vec::new(),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Layer {
+    Fill,
+    Cue,
+}
+
+fn ground(p: Vec2) -> (f32, f32, f32) {
+    (p.x, p.y, 0.0)
+}
+
+/// Lane outline with round ends, `len` long.
+fn stadium(z: &Zone, len: f32) -> Vec<(f32, f32, f32)> {
+    let base = z.dir.y.atan2(z.dir.x);
+    let n = 10;
+    let mut pts = Vec::with_capacity(2 * n + 2);
+    for (c, a0) in [(len, base - PI * 0.5), (0.0, base + PI * 0.5)] {
+        let centre = z.at(c, 0.0);
+        for i in 0..=n {
+            let a = a0 + PI * i as f32 / n as f32;
+            pts.push((
+                centre.x + z.half * a.cos(),
+                centre.y + z.half * a.sin(),
+                0.0,
+            ));
+        }
+    }
+    pts
+}
+
+/// Straight band covering a bolt's path, `len` long.
+fn band(z: &Zone, len: f32) -> [(f32, f32, f32); 4] {
+    [
+        ground(z.at(0.0, -z.half)),
+        ground(z.at(len, -z.half)),
+        ground(z.at(len, z.half)),
+        ground(z.at(0.0, z.half)),
+    ]
+}
+
+/// Paint one layer of an enemy's warning. Wax red marks danger; the shape and
+/// motion say which attack it is, so the cues survive in grayscale:
+/// - lunge: round-ended lane with pearl chevrons running down it;
+/// - charge: wide double-edged lane with rungs sweeping across it and a wall bar;
+/// - volley: bolt-wide bands with ink drops streaming out;
+/// - fan: the same bands, joined near the boss by a rim arc;
+/// - ring: spokes with a circle closing onto the boss;
+/// - shockwave: spokes with a dashed circle swelling outward;
+/// - summon: two seals with turning ticks.
+///
+/// The edge turns pearl and blinks in the last quarter of the windup.
+fn telegraph(pen: &mut Pen, f: &Foe, fam: Family, t: f32, layer: Layer) {
+    let zones = footprint(f, fam);
+    let w = urgency(f);
+    let edge = if w > 0.75 && (t * 20.0).sin() > 0.0 {
+        col(PEARL, 0.9)
+    } else {
+        col(WAX, 0.5 + 0.35 * w)
     };
-    let full = quad(0.0, len);
-    pen.path(
-        &full,
-        true,
-        Some(col(WAX, 0.10 + 0.08 * w)),
-        Some((1.6, col(WAX, 0.5 + 0.35 * pulse * w))),
-    );
-    let fill_pts = quad(0.0, len * w);
-    pen.path(&fill_pts, true, Some(col(WAX, 0.28 + 0.35 * w)), None);
+    let cue = col(PEARL, 0.3 + 0.5 * w);
+    match (fam, layer) {
+        (Family::Lunge | Family::Charge, Layer::Fill) => {
+            for z in &zones {
+                pen.path(
+                    &stadium(z, z.len),
+                    true,
+                    Some(col(WAX, 0.08 + 0.08 * w)),
+                    None,
+                );
+                pen.path(
+                    &stadium(z, z.len * w),
+                    true,
+                    Some(col(WAX, 0.22 + 0.3 * w)),
+                    None,
+                );
+            }
+        }
+        (Family::Lunge, Layer::Cue) => {
+            for z in &zones {
+                pen.path(&stadium(z, z.len), true, None, Some((1.6, edge)));
+                for k in 0..3 {
+                    let s = ((t * 1.8 + k as f32 / 3.0).fract()) * z.len;
+                    let tip = ground(z.at(s + 0.22, 0.0));
+                    for side in [-1.0, 1.0] {
+                        pen.line(ground(z.at(s - 0.12, side * z.half * 0.55)), tip, 2.2, cue);
+                    }
+                }
+            }
+        }
+        (Family::Charge, Layer::Cue) => {
+            for z in &zones {
+                pen.path(&stadium(z, z.len), true, None, Some((2.8, edge)));
+                let inner = Zone {
+                    half: z.half * 0.8,
+                    ..*z
+                };
+                pen.path(
+                    &stadium(&inner, z.len),
+                    true,
+                    None,
+                    Some((1.0, col(WAX, 0.7))),
+                );
+                let gap = 0.45;
+                let mut s = (t * 2.6).fract() * gap;
+                while s < z.len {
+                    let h = inner.half * 0.9;
+                    pen.line(ground(z.at(s, -h)), ground(z.at(s, h)), 1.8, cue);
+                    s += gap;
+                }
+                let far = z.len + z.half * 0.6;
+                pen.line(
+                    ground(z.at(far, -z.half)),
+                    ground(z.at(far, z.half)),
+                    3.2,
+                    edge,
+                );
+            }
+        }
+        (
+            Family::Volley { .. } | Family::Fan { .. } | Family::Ring { .. } | Family::Shockwave,
+            Layer::Fill,
+        ) => {
+            for z in &zones {
+                pen.path(
+                    &band(z, z.on_floor()),
+                    true,
+                    Some(col(WAX, 0.05 + 0.07 * w)),
+                    None,
+                );
+            }
+        }
+        (Family::Volley { .. } | Family::Fan { .. }, Layer::Cue) => {
+            for z in &zones {
+                pen.line(ground(z.o), ground(z.at(z.on_floor(), 0.0)), 1.3, edge);
+                let gap = 0.7;
+                let mut s = 0.4 + (t * 1.6).fract() * gap;
+                while s < z.on_floor() {
+                    let p = z.at(s, 0.0);
+                    pen.disc(p.x, p.y, 0.0, 2.4, cue);
+                    s += gap;
+                }
+            }
+            if let Family::Fan { n } = fam {
+                // Sweep from the facing angle, not per-lane atan2, so a fan
+                // aimed at -X does not wrap the long way round.
+                let d = norm(f.dir, Vec2::new(1.0, 0.0));
+                let half = (n - 1) as f32 * 0.5 * BOSS_FAN_SPREAD;
+                let (a0, a1) = (d.y.atan2(d.x) - half, d.y.atan2(d.x) + half);
+                let r = f.radius + 0.55;
+                pen.arc_line(f.pos, r, a0, a1, 0.0, 2.6, edge);
+                pen.arc_line(f.pos, r + 0.18, a0, a1, 0.0, 1.0, cue);
+            }
+        }
+        (Family::Ring { .. } | Family::Shockwave, Layer::Cue) => {
+            for z in &zones {
+                let near = z.on_floor().min(RING_GUIDE);
+                pen.line(
+                    ground(z.at(f.radius, 0.0)),
+                    ground(z.at(near, 0.0)),
+                    1.2,
+                    edge,
+                );
+                if z.on_floor() > near {
+                    pen.line(
+                        ground(z.at(near, 0.0)),
+                        ground(z.at(z.on_floor(), 0.0)),
+                        1.0,
+                        col(WAX, 0.25 + 0.2 * w),
+                    );
+                }
+            }
+            if fam == Family::Shockwave {
+                // Dashed circle swelling outward, one dash between each pair of spokes.
+                let r = f.radius + 0.2 + (RING_GUIDE - f.radius) * w;
+                let n = zones.len().max(1);
+                for k in 0..n {
+                    let a = (k as f32 + 0.5) * TAU / n as f32;
+                    pen.arc_line(f.pos, r, a - 0.12, a + 0.12, 0.0, 3.0, cue);
+                }
+            } else {
+                // A full circle closing in on the boss as release nears.
+                pen.arc_line(f.pos, RING_GUIDE, 0.0, TAU, 0.0, 1.0, col(WAX, 0.45));
+                let r = f.radius + 0.2 + (RING_GUIDE - f.radius - 0.2) * (1.0 - w);
+                pen.arc_line(f.pos, r, 0.0, TAU, 0.0, 2.6, cue);
+            }
+        }
+        (Family::Summon, layer) => {
+            // Seals open at the two flanks where clerks surface.
+            let to = norm(f.dir, Vec2::new(1.0, 0.0));
+            let side = Vec2::new(-to.y, to.x);
+            for s in [1.0f32, -1.0] {
+                let c = Vec2::new(f.pos.x + side.x * s * 1.6, f.pos.y + side.y * s * 1.6);
+                let r = 0.55 * (0.4 + 0.6 * w);
+                if layer == Layer::Fill {
+                    pen.arc(
+                        c,
+                        0.0,
+                        r,
+                        0.0,
+                        TAU,
+                        0.0,
+                        Some(col(WAX, 0.15 + 0.3 * w)),
+                        None,
+                    );
+                } else {
+                    pen.arc(c, 0.0, r, 0.0, TAU, 0.0, None, Some((1.6, col(PEARL, 0.5))));
+                    for k in 0..3 {
+                        let a = t * 2.0 * s + k as f32 * TAU / 3.0;
+                        pen.arc_line(c, r + 0.12, a, a + 0.6, 0.0, 1.8, cue);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::Input;
+
+    /// +X, +Y, -X, -Y: the four sprite directions.
+    const DIRECTIONS: [Vec2; 4] = [
+        Vec2::new(1.0, 0.0),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(-1.0, 0.0),
+        Vec2::new(0.0, -1.0),
+    ];
+
+    #[derive(Clone, Copy, Debug)]
+    struct Attack {
+        name: &'static str,
+        kind: EnemyKind,
+        /// `None` stages the end of the half-hull stagger.
+        attack: Option<u8>,
+        attack_index: u32,
+        phase2: bool,
+        chamber: usize,
+    }
+
+    const fn attack(
+        name: &'static str,
+        kind: EnemyKind,
+        attack: Option<u8>,
+        attack_index: u32,
+        phase2: bool,
+        chamber: usize,
+    ) -> Attack {
+        Attack {
+            name,
+            kind,
+            attack,
+            attack_index,
+            phase2,
+            chamber,
+        }
+    }
+
+    const ATTACKS: [Attack; 10] = [
+        attack("bailiff lunge", EnemyKind::Bailiff, Some(0), 0, false, 1),
+        attack("censor bolt", EnemyKind::Censor, Some(0), 0, false, 1),
+        attack("censor volley", EnemyKind::Censor, Some(0), 0, false, 2),
+        attack("ring", EnemyKind::Postmaster, Some(ATT_RING), 2, false, 3),
+        attack(
+            "rotated ring",
+            EnemyKind::Postmaster,
+            Some(ATT_RING),
+            1,
+            false,
+            3,
+        ),
+        attack(
+            "second-shift ring",
+            EnemyKind::Postmaster,
+            Some(ATT_RING),
+            1,
+            true,
+            3,
+        ),
+        attack(
+            "charge",
+            EnemyKind::Postmaster,
+            Some(ATT_CHARGE),
+            0,
+            false,
+            3,
+        ),
+        attack("fan", EnemyKind::Postmaster, Some(ATT_FAN), 0, false, 3),
+        attack(
+            "second-shift fan",
+            EnemyKind::Postmaster,
+            Some(ATT_FAN),
+            0,
+            true,
+            3,
+        ),
+        attack("stagger shockwave", EnemyKind::Postmaster, None, 0, true, 3),
+    ];
+
+    /// A quiet arena with the courier at `player` and each attack one tick
+    /// from release at its origin.
+    fn stage(attacks: &[(Attack, Vec2, Vec2)], player: Vec2) -> Game {
+        let mut g = Game::quiet_arena(5);
+        g.player.pos = player;
+        for &(a, origin, dir) in attacks {
+            g.chamber = a.chamber;
+            g.stage_release(a.kind, a.attack, a.attack_index, origin, dir, a.phase2);
+        }
+        g
+    }
+
+    /// Run the staged attacks out with the courier standing still. Each
+    /// attacker is disarmed once its attack has resolved so it cannot start
+    /// another one (it stays, so the chamber never counts as cleared).
+    /// Returns true if the courier was damaged.
+    fn lands(mut g: Game) -> bool {
+        let hp = g.player.hp;
+        for _ in 0..240 {
+            g.step(Input::default());
+            if g.player.hp < hp {
+                return true;
+            }
+            let mut live = false;
+            for i in 0..g.enemies.len() {
+                if g.attacking(i) {
+                    live = true;
+                } else {
+                    g.disarm(i);
+                }
+            }
+            if !live && !g.shots.iter().any(|s| s.hostile) {
+                return false;
+            }
+        }
+        false
+    }
+
+    /// The warning footprints the scene draws for the staged attacks.
+    fn warnings(g: &Game) -> Vec<Zone> {
+        g.enemies
+            .iter()
+            .map(foe)
+            .flat_map(|f| {
+                let fam = family(&f, g.chamber).expect("staged attack shows a warning");
+                footprint(&f, fam)
+            })
+            .collect()
+    }
+
+    /// Courier positions on a grid across the reachable floor.
+    fn floor() -> Vec<Vec2> {
+        let m = ARENA - COURIER_RADIUS;
+        let n = 26;
+        let mut pts = Vec::new();
+        for i in 0..=n {
+            for j in 0..=n {
+                let u = -m + 2.0 * m * i as f32 / n as f32;
+                let v = -m + 2.0 * m * j as f32 / n as f32;
+                pts.push(Vec2::new(u, v));
+            }
+        }
+        pts
+    }
+
+    #[test]
+    fn every_warning_covers_its_damaging_ticks_in_all_four_directions() {
+        let floor = floor();
+        for a in ATTACKS {
+            for d in DIRECTIONS {
+                // Open floor ahead, then a wall close ahead.
+                for origin in [d * -1.2, d * 2.4] {
+                    let staged = [(a, origin, d)];
+                    let zones = warnings(&stage(&staged, Vec2::new(9.0, 9.0)));
+                    assert!(!zones.is_empty(), "{}: no footprint", a.name);
+                    for &p in &floor {
+                        let hit = lands(stage(&staged, p));
+                        let gap = zones
+                            .iter()
+                            .map(|z| z.distance(p) - z.half)
+                            .fold(f32::INFINITY, f32::min);
+                        assert!(
+                            !hit || gap <= 0.02,
+                            "{} toward {d:?} from {origin:?}: hit at {p:?}, {gap:.2} outside the warning",
+                            a.name
+                        );
+                        // Well inside the warning the attack must connect: the
+                        // footprint is not padded beyond what can hit.
+                        let deep = zones.iter().any(|z| {
+                            z.distance(p) <= z.half - 0.15 && (p - z.o).dot(z.dir) <= z.len * 0.85
+                        });
+                        assert!(
+                            !deep || hit,
+                            "{} toward {d:?} from {origin:?}: never connected at {p:?} inside the warning",
+                            a.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A crowded moment: a Bailiff lunging and a Censor volley crossing the
+    /// Postmaster's fan. Rotated to each of the four directions, every hit
+    /// lands inside the union of the three warnings, and each warning keeps
+    /// its own family. Writes a top-down capture per direction to
+    /// `target/warning-capture/` for review.
+    #[test]
+    fn overlapping_encounter_hits_only_inside_its_warnings() {
+        let floor = floor();
+        for (i, d) in DIRECTIONS.into_iter().enumerate() {
+            let side = Vec2::new(-d.y, d.x);
+            let staged = [
+                (ATTACKS[0], d * -1.6 + side * 1.0, d),
+                (ATTACKS[2], d * -2.6 + side * -1.4, (d + side * 0.45).norm()),
+                (ATTACKS[8], d * -2.4, d),
+            ];
+            let g = stage(&staged, Vec2::new(9.0, 9.0));
+            let families: Vec<Family> = g
+                .enemies
+                .iter()
+                .map(|e| family(&foe(e), g.chamber).unwrap())
+                .collect();
+            assert!(matches!(
+                families[..],
+                [Family::Lunge, Family::Volley { n: 3 }, Family::Fan { n: 7 }]
+            ));
+            let zones = warnings(&g);
+            let mut hits = Vec::new();
+            for &p in &floor {
+                if lands(stage(&staged, p)) {
+                    assert!(
+                        zones.iter().any(|z| z.distance(p) <= z.half + 0.02),
+                        "direction {d:?}: hit at {p:?} outside every warning"
+                    );
+                    hits.push(p);
+                }
+            }
+            assert!(!hits.is_empty());
+            write_capture(i, &zones, &floor, &hits);
+        }
+    }
+
+    fn write_capture(direction: usize, zones: &[Zone], floor: &[Vec2], hits: &[Vec2]) {
+        let fit = Fit::new(DESIGN_W, DESIGN_H);
+        let pt = |p: Vec2| {
+            let (x, y) = fit.project(p.x, p.y, 0.0);
+            format!("{x:.1},{y:.1}")
+        };
+        let mut svg = format!(
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {DESIGN_W} {DESIGN_H}'>\
+             <rect width='100%' height='100%' fill='#060f12'/>"
+        );
+        let a = ARENA;
+        svg += &format!(
+            "<polygon points='{} {} {} {}' fill='#10353b'/>",
+            pt(Vec2::new(-a, -a)),
+            pt(Vec2::new(a, -a)),
+            pt(Vec2::new(a, a)),
+            pt(Vec2::new(-a, a))
+        );
+        for z in zones {
+            let pts: Vec<String> = if z.len < 6.0 && z.half > 0.7 {
+                stadium(z, z.len)
+                    .iter()
+                    .map(|p| pt(Vec2::new(p.0, p.1)))
+                    .collect()
+            } else {
+                band(z, z.len)
+                    .iter()
+                    .map(|p| pt(Vec2::new(p.0, p.1)))
+                    .collect()
+            };
+            svg += &format!(
+                "<polygon points='{}' fill='#d2301f' fill-opacity='0.22' stroke='#d2301f'/>",
+                pts.join(" ")
+            );
+        }
+        for &p in floor {
+            let colour = if hits.contains(&p) {
+                "#e9e4d2"
+            } else {
+                "#2fb3a2"
+            };
+            let (x, y) = fit.project(p.x, p.y, 0.0);
+            svg += &format!("<circle cx='{x:.1}' cy='{y:.1}' r='1.6' fill='{colour}'/>");
+        }
+        svg += "</svg>";
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/warning-capture");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(dir.join(format!("direction-{direction}.svg")), svg);
+        }
+    }
 }
