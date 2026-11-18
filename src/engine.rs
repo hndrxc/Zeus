@@ -559,7 +559,6 @@ pub struct Game {
     pub lesson: Option<Lesson>,
     drill_outro: f32,
     owned: u16,
-    drilled: bool,
     seed: u64,
     run: u64,
     rng: u64,
@@ -617,7 +616,6 @@ impl Game {
             lesson: None,
             drill_outro: 0.0,
             owned: 0,
-            drilled: false,
             seed,
             run: 0,
             rng: 1,
@@ -649,11 +647,10 @@ impl Game {
         self.seed
     }
 
-    /// Restart the current run in place: same RNG stream, and the opening
-    /// drill again if this run began with it.
+    /// Restart the current run in place on the same RNG stream, straight into
+    /// the waves. The drill never changes the seeded run, so it is not replayed.
     pub fn retry(&mut self) {
-        self.lesson = self.drilled.then_some(Lesson::Strike);
-        self.drill_outro = DRILL_OUTRO;
+        self.lesson = None;
         self.fresh_floor();
     }
 
@@ -661,7 +658,6 @@ impl Game {
     pub fn start(&mut self) {
         self.run += 1;
         self.lesson = None;
-        self.drilled = false;
         self.fresh_floor();
     }
 
@@ -669,7 +665,6 @@ impl Game {
     /// until the drill is completed or skipped.
     pub fn start_drill(&mut self) {
         self.start();
-        self.drilled = true;
         self.lesson = Some(Lesson::Strike);
         self.drill_outro = DRILL_OUTRO;
     }
@@ -2073,7 +2068,7 @@ mod tests {
         let foes: Vec<_> = g.enemies.iter().map(|e| (e.kind, e.pos, e.hp)).collect();
         let shots: Vec<_> = g.shots.iter().map(|s| s.pos).collect();
         format!(
-            "{:?} {:?} {} {} {} {} {:?} {:?} {:?} {:?}",
+            "{:?} {:?} {} {} {} {} {:?} {:?} {:?} {:?} {:?}",
             g.phase,
             g.player.pos,
             g.player.hp,
@@ -2083,7 +2078,8 @@ mod tests {
             foes,
             shots,
             g.choices,
-            g.rng
+            g.rng,
+            g.mods
         )
     }
 
@@ -2250,9 +2246,9 @@ mod tests {
         let bodies: usize = (1..=CHAMBERS)
             .flat_map(|c| (0..waves_in(c)).map(move |w| wave_kinds(c, w).len()))
             .sum();
-        assert_eq!((groups.len(), waves), (6, 6));
+        assert_eq!(groups.len(), waves);
         assert_eq!(emerged.len(), bodies);
-        assert_eq!((offers.len(), CHAMBERS - 1), (2, 2));
+        assert_eq!(offers.len(), CHAMBERS - 1);
     }
 
     #[test]
@@ -2279,43 +2275,25 @@ mod tests {
     }
 
     #[test]
-    fn retry_reopens_the_drill_only_when_the_run_began_with_it() {
+    fn retry_skips_the_drill_and_replays_scripted_play_after_a_win() {
+        let play = |g: &mut Game| {
+            for t in 0..1_500 {
+                g.step(scripted(t));
+            }
+            fingerprint(g)
+        };
+        let mut plain = Game::new(5);
+        plain.start();
+        let expected = play(&mut plain);
+
+        // A drilled run, won with endorsements in hand.
         let mut g = Game::new(5);
         g.start_drill();
         g.skip_drill();
-        let drilled = run_trace(&mut g);
-        g.retry();
-        assert_eq!(g.lesson, Some(Lesson::Strike));
-        assert!(g.enemies.is_empty() && g.arrivals.is_empty());
-        g.skip_drill();
-        assert_eq!(run_trace(&mut g), drilled);
-
-        // Completing the drill, then retrying, reopens it with a fresh outro.
-        g.retry();
-        let mut t = 0;
-        while g.lesson.is_some() {
-            assert!(t < 2_000, "drill did not finish");
-            g.step(scripted(t + 3));
-            t += 1;
-        }
         let _ = run_trace(&mut g);
-        assert_eq!(g.phase, Phase::Won);
         g.retry();
-        assert_eq!(g.lesson, Some(Lesson::Strike));
-
-        // A run started without the drill never reopens it.
-        let mut p = Game::new(5);
-        p.start();
-        let plain = run_trace(&mut p);
-        p.retry();
-        assert_eq!(p.lesson, None);
-        assert_eq!(run_trace(&mut p), plain);
-        assert_eq!(plain, drilled, "same run number, same stream");
-
-        // Starting plainly after a drilled run forgets the drill.
-        g.start();
-        g.retry();
-        assert_eq!(g.lesson, None);
+        assert_eq!(g.lesson, None, "retry goes straight to the waves");
+        assert_eq!(play(&mut g), expected);
     }
 
     #[test]

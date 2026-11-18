@@ -23,7 +23,7 @@ Extract `dead-letter-windows-x64.zip` and launch `dead-letter.exe`. If you have 
 
 For keyboard-only play, J and K aim in the movement direction, or along the courier’s last facing when standing still. Move the mouse to return to pointer aiming.
 
-The results screen shows the full delivery seed. A same-seed retry repeats the waves and endorsement offers when you use the same inputs and make the same choices.
+The results screen shows the full delivery seed. A same-seed retry goes straight to the waves, skipping the drill, and repeats the waves and endorsement offers when you use the same inputs and make the same choices.
 
 ## A delivery from start to finish
 

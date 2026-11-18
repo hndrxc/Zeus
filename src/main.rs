@@ -186,14 +186,14 @@ impl Shell {
         self.dispatch(drill);
     }
 
-    /// Same-seed retry of the current run, with all shell-only run state reset.
+    /// Same-seed retry of the finished run. Like `restart`, it keeps keys
+    /// that are still physically held.
     fn retry(&mut self) {
         self.game.retry();
         self.boons.clear();
         self.paused = false;
         self.acc = 0.0;
         self.latch = Latch::default();
-        self.held = Held::default();
     }
 
     fn skip_drill(&mut self) {
