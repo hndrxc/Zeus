@@ -59,6 +59,10 @@ const INK: u32 = 0x060f12;
 
 static ARENA_IMG: LazyLock<Arc<Image>> =
     LazyLock::new(|| png(include_bytes!("../assets/arena.png")));
+static ARENA_VAULT_IMG: LazyLock<Arc<Image>> =
+    LazyLock::new(|| png(include_bytes!("../assets/arena_vault.png")));
+static ARENA_OFFICE_IMG: LazyLock<Arc<Image>> =
+    LazyLock::new(|| png(include_bytes!("../assets/arena_office.png")));
 macro_rules! sprite_frames {
     ($actor:literal, $direction:literal; $($frame:literal),+) => {
         [$(png(include_bytes!(concat!("../assets/", $actor, "/", $direction, "_", $frame, ".png")))),+]
@@ -123,8 +127,12 @@ fn png(bytes: &'static [u8]) -> Arc<Image> {
     Arc::new(Image::from_bytes(ImageFormat::Png, bytes.to_vec()))
 }
 
-fn arena_image() -> Arc<Image> {
-    ARENA_IMG.clone()
+fn arena_image(chamber: usize) -> Arc<Image> {
+    match chamber {
+        2 => ARENA_VAULT_IMG.clone(),
+        3 => ARENA_OFFICE_IMG.clone(),
+        _ => ARENA_IMG.clone(),
+    }
 }
 fn courier_image(player: &crate::engine::Player) -> Arc<Image> {
     let (facing, frame) = if let Some((dir, progress)) = player.dash_pose() {
@@ -1105,7 +1113,7 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         .overflow_hidden()
         .bg(rgb(INK))
         .child(
-            img(arena_image())
+            img(arena_image(world.chamber))
                 .absolute()
                 .left(px(fit.ox))
                 .top(px(fit.oy))

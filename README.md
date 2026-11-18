@@ -1,6 +1,6 @@
 # DEAD LETTER: The Undertow Post
 
-*No address beyond the tide.* Play a courier delivering mail through a drowned sorting office run by clockwork clerks. DEAD LETTER is a single-player isometric action roguelike written in Rust. All three chambers share one submerged diorama. The waves, endorsements and boss patterns change as the delivery progresses.
+*No address beyond the tide.* Play a courier delivering mail through a drowned sorting office run by clockwork clerks. DEAD LETTER is a single-player isometric action roguelike written in Rust. Each of the three chambers has its own submerged arena art. The waves, endorsements and boss patterns change as the delivery progresses.
 
 ## Play on Windows
 
@@ -25,8 +25,8 @@ For keyboard-only play, J and K aim in the movement direction, or along the cour
 ## A delivery from start to finish
 
 1. **Sorting Floor.** The first delivery of a session opens with a short drill: strike, cast, then dash, each prompted at the bottom of the screen. Waves hold until the drill ends, and finishing or skipping it leaves the seeded run unchanged. Then clear two waves. Bailiffs wind up before lunging, giving you time to sidestep or dash. Censors introduce ranged fire in the second wave.
-2. **Dead Letter Vault.** Clear three waves of mixed clerks. After each of the first two chambers, pick one of three endorsements. The choice applies for the run, and entering the next chamber restores 25 HP up to your maximum.
-3. **Postmaster’s Office.** Face the Postmaster. At half health the boss briefly becomes invulnerable and begins its second shift. Watch the floor markings for charge lanes and projectile patterns.
+2. **Dead Letter Vault.** Look for the sealed door and locks behind the floor. Clear three waves of mixed clerks. After each of the first two chambers, pick one of three endorsements. The choice applies for the run, and entering the next chamber restores 25 HP up to your maximum.
+3. **Postmaster’s Office.** Look for the postmaster’s desk and crest behind the floor. Face the Postmaster. At half health the boss briefly becomes invulnerable and begins its second shift. Watch the floor markings for charge lanes and projectile patterns.
 
 ## Build and test
 
@@ -52,7 +52,7 @@ To publish, update the package version in Cargo.toml and Cargo.lock, merge the t
 | [src/engine.rs](src/engine.rs) | Advances the game one 60 Hz tick at a time. Owns player and enemy state, collisions, projectiles, waves, endorsements, and simulation tests. |
 | [src/main.rs](src/main.rs) | Hosts the GPUI window. Translates key and mouse events into game inputs, drives the fixed-step clock, and draws the full-screen HUD and menus. |
 | [src/scene.rs](src/scene.rs) | Projects world positions onto the arena, maps cursor positions back to the ground, selects sprite frames, and layers actors, attack warnings and effects. |
-| [assets/](assets/) | Contains the baked arena, directional animation frames, character stills and editable Blender character scenes. |
+| [assets/](assets/) | Contains the baked chamber backgrounds, directional animation frames, character stills and editable Blender character scenes. |
 | [tools/](tools/) | Contains the procedural Blender bake driver and actor-specific rigging and animation code. |
 
 ## Rebuild the artwork
@@ -63,10 +63,10 @@ Ordinary builds use the supplied PNGs. To change generated art, edit the procedu
 # Rebuild just the courier with the default Cycles renderer
 blender -b -P tools/bake_assets.py -- --only courier
 
-# Rebuild the arena and all four characters
+# Rebuild the three arena PNGs and all four characters
 blender -b -P tools/bake_assets.py
 ```
 
-The available jobs are `arena`, `courier`, `bailiff`, `censor` and `postmaster`. The arena PNG is 2700 × 1800, fitted to a 900 × 600 design space. Each 768 × 768 character frame represents a 256 × 256 sprite in that space. Each character has four orthographic views. Rebuild the executable after a bake to pick up changed PNGs.
+The available jobs are `arena`, `courier`, `bailiff`, `censor` and `postmaster`. To rebuild only the chamber art, run `blender -b -P tools/bake_assets.py -- --only arena`. It writes `assets/arena.png` (Sorting Floor), `assets/arena_vault.png` (Dead Letter Vault) and `assets/arena_office.png` (Postmaster’s Office). All three are 2700 × 1800 and share one registration to the 900 × 600 design space. Each 768 × 768 character frame represents a 256 × 256 sprite in that space. Each character has four orthographic views. Rebuild the executable after a bake to pick up changed PNGs.
 
 For implementation conventions and checks to run when changing combat or art, see [AGENTS.md](AGENTS.md).

@@ -261,8 +261,8 @@ def uv(u, v):
 
 
 # --------------------------------------------------------------- arena
-def build_arena(M):
-    rnd = random.Random(7)
+def arena_base(M, rnd):
+    """Shared floor slab, tiles, border and side walls (all chambers)."""
     H = 4.2
     # slab with chamfered vertical edges
     bm = bmesh.new()
@@ -337,6 +337,10 @@ def build_arena(M):
     for t in range(-3, 4):
         box((4.21, t * 1.1, -0.45), (0.03, 0.8, 0.36), M["teal_d"], bev=0.02, name="panel")
         box((t * 1.1, -4.21, -0.45), (0.8, 0.03, 0.36), M["teal_d"], bev=0.02, name="panel")
+
+
+def arena_sorting(M, rnd):
+    """Sorting Floor only: inscriptions, markings and back/front props."""
         # stencilled hull numbers
     for t in range(-3, 4, 2):
         text((4.24, t * 1.1, -0.45), "%02d" % (t + 4), 0.22, M["sulfur"], rotz=math.pi / 2, extrude=0.004).rotation_euler = (math.pi / 2, 0, math.pi / 2)
@@ -435,12 +439,13 @@ def build_arena(M):
     # hopper
     cyl((-1.2, my, 2.55), 0.9, 0.7, M["brass"], r2=0.35, seg=4, rot=(0, 0, math.pi / 4), smooth=False)
     cyl((-1.2, my, 3.1), 0.4, 0.5, M["copper"], seg=16)
-    # conveyor
-    box((-1.2, my - 1.25, 0.12), (4.0, 0.5, 0.16), M["steel"], name="belt")
+    # Keep the conveyor against the chute, outside the reachable floor.
+    belt_y = my - 0.65
+    box((-1.2, belt_y, 0.12), (4.0, 0.28, 0.16), M["steel"], name="belt")
     for t in range(15):
-        box((-3.0 + t * 0.28, my - 1.25, 0.22), (0.05, 0.46, 0.04), M["black"], name="slat")
+        box((-3.0 + t * 0.28, belt_y, 0.22), (0.05, 0.26, 0.04), M["black"], name="slat")
     for t in range(3):
-        box((-2.4 + t * 1.3, my - 1.25, 0.32), (0.3, 0.2, 0.1), M["paper"], rot=(0, 0, 0.2 * t), name="parcel")
+        box((-2.4 + t * 1.3, belt_y, 0.32), (0.3, 0.2, 0.1), M["paper"], rot=(0, 0, 0.2 * t), name="parcel")
     # pneumatic tubes
     for k, (z, yo) in enumerate(((2.3, 0.0), (2.0, 0.0), (2.6, 0.0))):
         beam((-3.3 + 0.3 * k, my + 0.1, z + 0.6), (1.3 - 0.2 * k, my + 0.1, z + 0.6), 0.1, M["copper"])
@@ -502,6 +507,10 @@ def build_arena(M):
     for k in range(10):
         box((-3.3 + k * 0.28, -4.5, 0.17 - 0.03 * math.sin(k / 9 * math.pi) * 2), (0.1, 0.03, 0.03), M["steel"], name="chain")
 
+
+def arena_under(M):
+    """Shared supports below the floor."""
+
     # underside supports in black water
     for (x, y) in ((-3.5, -3.5), (3.5, -3.5), (3.5, 3.5), (-3.5, 3.5), (0, -3.5), (3.5, 0), (-3.5, 0), (0, 3.5)):
         box((x, y, -2.6), (0.5, 0.5, 4.2), M["rust"], name="strut")
@@ -509,6 +518,10 @@ def build_arena(M):
     # hanging cables below front
     for x in (-2.5, 1.3, 3.7):
         beam((x, -4.25, -0.7), (x + 0.2, -4.4, -3.5), 0.03, M["black"])
+
+
+def arena_backdrop(M, rnd):
+    """Shared water backdrop, bubbles and key lighting."""
 
     # water backdrop: a distant dark plane with gradient, bubbles and ghost pylons
     bpy.ops.mesh.primitive_plane_add(size=120, location=(0, 0, -14))
@@ -750,12 +763,31 @@ def render(path):
     print("WROTE", path)
 
 
-def bake_arena(engine):
+def arena_scene(engine):
     fresh()
     M = P()
     setup(900 * SS, 600 * SS, 900 / PX, 8 * SS, False, engine, samples=64)
-    build_arena(M)
+    return M
+
+
+def bake_arena(engine):
+    import runpy
+    # Sorting Floor: original draw order (floor, sorting props, backdrop)
+    M = arena_scene(engine)
+    rnd = random.Random(7)
+    arena_base(M, rnd)
+    arena_sorting(M, rnd)
+    arena_under(M)
+    arena_backdrop(M, rnd)
     render(os.path.join(OUT, "arena.png"))
+    for name, out in (("arena_vault", "arena_vault.png"), ("arena_office", "arena_office.png")):
+        M = arena_scene(engine)
+        rnd = random.Random(7)
+        arena_base(M, rnd)
+        runpy.run_path(os.path.join(ROOT, "tools", name + ".py"), init_globals=globals())["build"](M)
+        arena_under(M)
+        arena_backdrop(M, rnd)
+        render(os.path.join(OUT, out))
 
 
 def bake_enemy(name, builder, engine):
