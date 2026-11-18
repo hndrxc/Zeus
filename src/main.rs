@@ -401,7 +401,7 @@ fn hud_card() -> Div {
 
 fn life_pips(frac: f32, total: usize, color: u32) -> Div {
     let lit = (frac.clamp(0.0, 1.0) * total as f32).ceil() as usize;
-    let mut row = div().flex().flex_row(). items_center().gap(px(3.0));
+    let mut row = div().flex().flex_row().items_center().gap(px(3.0));
     for i in 0..total {
         let active = i < lit;
         row = row.child(
@@ -409,17 +409,9 @@ fn life_pips(frac: f32, total: usize, color: u32) -> Div {
                 .w(px(13.0))
                 .h(px(10.0))
                 .rounded(px(2.0))
-                .bg(if active {
-                    rgb(color)
-                } else {
-                    rgba(0x13282cc8)
-                })
+                .bg(if active { rgb(color) } else { rgba(0x13282cc8) })
                 .border_1()
-                .border_color(if active {
-                    rgb(color)
-                } else {
-                    rgba(0xede8d824)
-                }),
+                .border_color(if active { rgb(color) } else { rgba(0xede8d824) }),
         );
     }
     row
@@ -535,8 +527,10 @@ impl Render for Shell {
             .child(self.hud_top_left())
             .children(self.hud_boss())
             .child(self.hud_top_right())
-            .child(self.hud_bottom_controls())
             .children(self.overlay(m, cx))
+            .when(self.paused || self.game.phase == Phase::Ready, |root| {
+                root.child(self.hud_bottom_controls())
+            })
     }
 }
 
@@ -588,7 +582,7 @@ impl Shell {
                     .items_baseline()
                     .justify_between()
                     .gap(px(12.0))
-                    .child(mono("HULL INTEGRITY", 9.0, PEARL_DIM))
+                    .child(mono("HULL INTEGRITY", 11.0, PEARL_DIM))
                     .child(
                         mono(
                             format!("{:.0} / {:.0}", p.hp.max(0.0).ceil(), p.max_hp),
@@ -601,7 +595,7 @@ impl Shell {
             .child(life_pips(hull, 12, hull_color));
 
         let ability_pill =
-            |name: &'static str, key: &'static str, status: String, f: f32, ready: bool, c: u32, dim_c: u32| {
+            |name: &'static str, status: String, f: f32, ready: bool, c: u32, dim_c: u32| {
                 hud_card()
                     .flex()
                     .flex_col()
@@ -615,14 +609,13 @@ impl Shell {
                             .flex_row()
                             .items_baseline()
                             .justify_between()
-                            .child(mono(name, 9.0, PEARL_DIM))
+                            .child(mono(name, 11.0, PEARL_DIM))
                             .child(
-                                mono(status, 9.0, if ready { c } else { PEARL_DIM })
+                                mono(status, 12.0, if ready { c } else { PEARL_DIM })
                                     .font_weight(FontWeight::BOLD),
                             ),
                     )
                     .child(gauge(f, if ready { c } else { dim_c }))
-                    .child(mono(key, 8.0, PEARL_DIM))
             };
 
         let abilities_row = div()
@@ -631,7 +624,6 @@ impl Shell {
             .gap(px(8.0))
             .child(ability_pill(
                 "DASH",
-                "SPACE",
                 cd_text(p.dash_cooldown),
                 dash_frac,
                 dash_ready,
@@ -640,7 +632,6 @@ impl Shell {
             ))
             .child(ability_pill(
                 "CAST",
-                "RMB / K",
                 cd_text(p.cast_cooldown),
                 cast_frac,
                 cast_ready,
@@ -649,35 +640,22 @@ impl Shell {
             ));
 
         let mut endorsements = div().flex().flex_col().gap(px(4.0));
-        if self.boons.is_empty() {
+        for (i, b) in self.boons.iter().enumerate() {
             endorsements = endorsements.child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
                     .px(px(8.0))
                     .py(px(3.0))
                     .rounded(px(3.0))
                     .bg(rgba(HUD_BG_SOFT))
                     .border_1()
                     .border_color(rgba(HUD_BORDER))
-                    .child(mono("ENDORSEMENTS \u{00b7} NONE", 9.0, PEARL_DIM)),
+                    .child(mono(roman(i + 1), 9.0, BRASS).font_weight(FontWeight::BOLD))
+                    .child(mono(b.title(), 11.0, PEARL)),
             );
-        } else {
-            for (i, b) in self.boons.iter().enumerate().take(6) {
-                endorsements = endorsements.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded(px(3.0))
-                        .bg(rgba(HUD_BG_SOFT))
-                        .border_1()
-                        .border_color(rgba(HUD_BORDER))
-                        .child(mono(roman(i + 1), 9.0, BRASS).font_weight(FontWeight::BOLD))
-                        .child(mono(b.title(), 9.0, PEARL)),
-                );
-            }
         }
 
         div()
@@ -690,7 +668,7 @@ impl Shell {
             .gap(px(8.0))
             .child(hull_card)
             .child(abilities_row)
-            .child(endorsements)
+            .when(!self.boons.is_empty(), |hud| hud.child(endorsements))
     }
 
     /// Top-center HUD: BotW-style cinematic boss health bar when the Postmaster is present.
@@ -966,7 +944,11 @@ impl Shell {
                             .gap(px(8.0))
                             .child(mono(roman(i + 1), 10.0, BRASS).font_weight(FontWeight::BOLD))
                             .child(mono(b.title(), 11.0, PEARL).font_weight(FontWeight::BOLD))
-                            .child(mono(format!("\u{2014} {}", b.description()), 10.0, PEARL_DIM)),
+                            .child(mono(
+                                format!("\u{2014} {}", b.description()),
+                                10.0,
+                                PEARL_DIM,
+                            )),
                     );
                 }
                 panel = panel.child(list);
@@ -1021,11 +1003,7 @@ impl Shell {
                                     .line_height(px(46.0)),
                             )
                             .child(rule_alpha(0xe5c14866).w(px(220.0)))
-                            .child(mono(
-                                "NO ADDRESS BEYOND THE TIDE",
-                                10.0,
-                                PEARL_DIM,
-                            )),
+                            .child(mono("NO ADDRESS BEYOND THE TIDE", 10.0, PEARL_DIM)),
                     )
                     .child(
                         hud_card()
@@ -1033,12 +1011,8 @@ impl Shell {
                             .py(px(9.0))
                             .border_color(rgb(BRASS))
                             .child(
-                                mono(
-                                    "PRESS ENTER, SPACE OR CLICK TO DISPATCH",
-                                    11.0,
-                                    PEARL,
-                                )
-                                .font_weight(FontWeight::BOLD),
+                                mono("PRESS ENTER, SPACE OR CLICK TO DISPATCH", 11.0, PEARL)
+                                    .font_weight(FontWeight::BOLD),
                             ),
                     ),
             ),
@@ -1107,11 +1081,7 @@ impl Shell {
                                 .font_weight(FontWeight::BOLD)
                                 .line_height(px(36.0)),
                         )
-                        .child(mono(
-                            "PICK ONE STAMP FOR THE SATCHEL",
-                            10.0,
-                            PEARL_DIM,
-                        ))
+                        .child(mono("PICK ONE STAMP FOR THE SATCHEL", 10.0, PEARL_DIM))
                         .child(cards)
                         .child(mono(
                             "PRESS 1 \u{00b7} 2 \u{00b7} 3 OR CLICK A CARD",
