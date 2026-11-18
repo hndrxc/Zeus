@@ -14,8 +14,8 @@ def _vault_door(M):
                 -1.42 + s * depth + c * across, 1.58 + up)
 
     def disk(depth, radius, thickness, material, name, segments=64):
-        cyl(p(depth), radius, thickness, M[material], rot=axis, seg=segments,
-            smooth=False, name=name)
+        return cyl(p(depth), radius, thickness, M[material], rot=axis, seg=segments,
+                   smooth=False, name=name)
 
     # Stepped casting: the dark rebate remains visible between the machined
     # shoulder and the door leaf. No rectangular wall behind the crown.
@@ -54,7 +54,9 @@ def _vault_door(M):
              0.06, M["brass_d"], seg=10, name="vault_wheel_spoke")
     torus(p(0.59), 0.72, 0.084, M["brass_d"], rot=axis, maj=48, mnr=10)
     disk(0.515, 0.19, 0.12, "steel", "vault_hub_nut", 6)
-    disk(0.58, 0.095, 0.035, "cyan_l", "vault_sealed_indicator", 20)
+    # Visible to the camera but not to glossy rays: its mirror image in the
+    # clear-coated floor would read as a stationary friendly bolt.
+    disk(0.58, 0.095, 0.035, "cyan_l", "vault_sealed_indicator", 20).visible_glossy = False
 
 
 def _deposit_bank(M, x, y, width, height, cols, rows):

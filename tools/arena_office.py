@@ -25,8 +25,11 @@ def banker_lamp(M, x, y, z):
         bm.faces.new((left[i], left[i + 1], right[i + 1], right[i])).smooth = True
     bm.faces.new((left[-1], left[0], right[0], right[-1]))
     new_obj(bm, "banker_hood", (x, y - 0.07, z + 0.50), (0, 0, 0), M["glass"])
-    box((x, y - 0.07, z + 0.493), (0.60, 0.27, 0.028), M["lamp"], bev=0.01, name="lamp_diffuser")
-    light("POINT", (x, y - 0.16, z + 0.43), 12, (1.0, 0.71, 0.37), 0.15)
+    # The lit diffuser and the point light stay visible to the camera but not to
+    # glossy rays: their mirror images in the clear-coated floor would read as a
+    # hostile bolt in the boss chamber.
+    box((x, y - 0.07, z + 0.493), (0.60, 0.27, 0.028), M["lamp"], bev=0.01, name="lamp_diffuser").visible_glossy = False
+    light("POINT", (x, y - 0.16, z + 0.43), 12, (1.0, 0.71, 0.37), 0.15).visible_glossy = False
 
 
 def desk(M):
