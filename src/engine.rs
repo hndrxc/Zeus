@@ -26,6 +26,8 @@ const CAST_SPEED: f32 = 11.0;
 const CAST_DAMAGE: f32 = 18.0;
 const EMERGE_TIME: f32 = 0.8;
 const LULL: f32 = 0.9;
+/// Seconds a wave clerk's entry point is marked before it starts to emerge.
+pub const SPAWN_WARNING: f32 = 0.9;
 const HEAL_BETWEEN_CHAMBERS: f32 = 25.0;
 
 const S_MOVE: u8 = 0;
@@ -137,6 +139,32 @@ pub enum EnemyKind {
     Bailiff,
     Censor,
     Postmaster,
+}
+
+impl EnemyKind {
+    pub fn radius(self) -> f32 {
+        match self {
+            EnemyKind::Bailiff => 0.38,
+            EnemyKind::Censor => 0.32,
+            EnemyKind::Postmaster => 0.75,
+        }
+    }
+}
+
+/// A wave clerk marked on the floor at its entry point. It becomes an emerging
+/// `Enemy` at the same position when the warning runs out.
+#[derive(Clone, Debug)]
+pub struct Arrival {
+    pub kind: EnemyKind,
+    pub pos: Vec2,
+    timer: f32,
+}
+
+impl Arrival {
+    /// Rising 0..=1 progress of the entry warning.
+    pub fn progress(&self) -> f32 {
+        (1.0 - self.timer / SPAWN_WARNING).clamp(0.0, 1.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -362,11 +390,7 @@ impl Enemy {
     }
 
     pub fn radius(&self) -> f32 {
-        match self.kind {
-            EnemyKind::Bailiff => 0.38,
-            EnemyKind::Censor => 0.32,
-            EnemyKind::Postmaster => 0.75,
-        }
+        self.kind.radius()
     }
     fn begin(&mut self, state: u8, dur: f32) {
         self.state = state;
@@ -428,6 +452,8 @@ pub struct Game {
     next_id: u32,
     live: usize,
     pending: Vec<Enemy>,
+    /// Wave clerks still marked on the floor, in spawn order.
+    pub arrivals: Vec<Arrival>,
     prev_dash: bool,
     dash_stamp: u32,
     wipe_shots: bool,
@@ -480,6 +506,7 @@ impl Game {
             next_id: 0,
             live: 0,
             pending: Vec::with_capacity(4),
+            arrivals: Vec::with_capacity(4),
             prev_dash: false,
             dash_stamp: 0,
             wipe_shots: false,
@@ -508,6 +535,7 @@ impl Game {
         self.shots.clear();
         self.effects.clear();
         self.pending.clear();
+        self.arrivals.clear();
         self.time = 0.0;
         self.kills = 0;
         self.seal_count = 0;
@@ -567,6 +595,7 @@ impl Game {
         self.player.invuln = 0.5;
         self.enemies.clear();
         self.pending.clear();
+        self.arrivals.clear();
         self.shots.clear();
         self.effects.clear();
         self.wave = 0;
@@ -927,8 +956,13 @@ impl Game {
             let c = clamp_arena(Vec2::from_angle(a) * rad, r + 0.1);
             best = c;
             let mut ok = (c - self.player.pos).len() >= 3.0;
-            for e in self.enemies.iter().chain(self.pending.iter()) {
-                if (e.pos - c).len() < 1.1 {
+            let taken = self
+                .enemies
+                .iter()
+                .chain(self.pending.iter())
+                .map(|e| e.pos);
+            for p in taken.chain(self.arrivals.iter().map(|a| a.pos)) {
+                if (p - c).len() < 1.1 {
                     ok = false;
                 }
             }
@@ -946,10 +980,28 @@ impl Game {
                 _ => 0.38,
             };
             let pos = self.pick_spawn(r);
-            let e = self.make_enemy(kind, pos);
-            self.enemies.push(e);
+            self.arrivals.push(Arrival {
+                kind,
+                pos,
+                timer: SPAWN_WARNING,
+            });
         }
         self.wave += 1;
+    }
+
+    /// Count down marked entry points; each expired one emerges where it was marked.
+    fn land_arrivals(&mut self) {
+        let mut i = 0;
+        while i < self.arrivals.len() {
+            self.arrivals[i].timer -= DT;
+            if self.arrivals[i].timer > 0.0 {
+                i += 1;
+                continue;
+            }
+            let a = self.arrivals.remove(i);
+            let e = self.make_enemy(a.kind, a.pos);
+            self.enemies.push(e);
+        }
     }
 
     fn update_enemies(&mut self) {
@@ -1328,6 +1380,7 @@ impl Game {
                 });
             }
             self.pending.clear();
+            self.arrivals.clear();
             self.shots.retain(|s| !s.hostile);
         }
     }
@@ -1340,7 +1393,8 @@ impl Game {
     }
 
     fn advance_waves(&mut self) {
-        if !self.enemies.is_empty() || !self.pending.is_empty() {
+        self.land_arrivals();
+        if !self.enemies.is_empty() || !self.pending.is_empty() || !self.arrivals.is_empty() {
             self.lull = LULL;
             return;
         }
@@ -1640,6 +1694,85 @@ mod tests {
         let t = g.time;
         g.step(idle());
         assert_eq!(g.time, t);
+    }
+
+    /// Step idle from a fresh run until the first wave is marked on the floor.
+    fn until_marked(g: &mut Game) -> usize {
+        for tick in 0..600 {
+            g.step(idle());
+            if !g.arrivals.is_empty() {
+                return tick;
+            }
+        }
+        panic!("no wave was marked");
+    }
+
+    #[test]
+    fn wave_entry_points_are_marked_for_the_warning_interval_before_clerks_emerge() {
+        let mut g = Game::new(19);
+        g.start();
+        until_marked(&mut g);
+        let kinds: Vec<EnemyKind> = g.arrivals.iter().map(|a| a.kind).collect();
+        assert_eq!(kinds, wave_kinds(1, 0));
+        let marks: Vec<Vec2> = g.arrivals.iter().map(|a| a.pos).collect();
+        for m in &marks {
+            assert!(
+                (*m - g.player.pos).len() >= 1.0,
+                "marker on top of the courier"
+            );
+        }
+
+        // Nothing in the wave exists, and so nothing can attack, while it is marked.
+        let mut marked_ticks = 1;
+        let mut last = g.arrivals[0].progress();
+        while !g.arrivals.is_empty() {
+            assert!(g.enemies.is_empty());
+            assert!(g.arrivals[0].progress() >= last, "progress must rise");
+            last = g.arrivals[0].progress();
+            g.step(idle());
+            if !g.arrivals.is_empty() {
+                marked_ticks += 1;
+            }
+        }
+        let expected = (SPAWN_WARNING / DT).round() as i32;
+        assert!(
+            (marked_ticks - expected).abs() <= 1,
+            "marked for {marked_ticks} ticks, expected ~{expected}"
+        );
+
+        // Each clerk surfaces exactly where it was marked, still emerging and harmless.
+        assert_eq!(g.enemies.len(), marks.len());
+        for (e, m) in g.enemies.iter().zip(&marks) {
+            assert!((e.pos - *m).len() < 1e-6, "{:?} vs {:?}", e.pos, m);
+            assert!(e.emerging);
+        }
+        while g.enemies.iter().any(|e| e.emerging) {
+            assert!(g.enemies.iter().all(|e| e.windup == 0.0));
+            assert_eq!(g.player.hp, PLAYER_HP);
+            g.step(idle());
+        }
+    }
+
+    #[test]
+    fn chamber_cleanup_and_restart_clear_marked_arrivals() {
+        let mut g = Game::new(23);
+        g.start();
+        until_marked(&mut g);
+        // Leaving the chamber while a wave is still marked drops it.
+        g.phase = Phase::Choice;
+        g.choose(0);
+        assert!(g.arrivals.is_empty());
+        assert!(g.enemies.is_empty());
+        until_marked(&mut g);
+        let kinds: Vec<EnemyKind> = g.arrivals.iter().map(|a| a.kind).collect();
+        assert_eq!(
+            kinds,
+            wave_kinds(2, 0),
+            "next chamber starts from its first wave"
+        );
+
+        g.start();
+        assert!(g.arrivals.is_empty());
     }
 
     #[test]

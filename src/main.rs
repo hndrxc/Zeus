@@ -745,7 +745,8 @@ impl Shell {
     fn hud_top_right(&self) -> Div {
         let g = &self.game;
         let ch = g.chamber.max(1);
-        let hostiles = g.enemies.len();
+        // Marked entry points count: those clerks are already on their way.
+        let hostiles = g.enemies.len() + g.arrivals.len();
 
         let (phase_text, phase_color) = if self.paused {
             ("PAUSED", BRASS)
