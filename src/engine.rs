@@ -147,6 +147,55 @@ pub enum EffectKind {
     Burst,
 }
 
+/// The attack behind a hit on the courier; the defeat screen reports the lethal one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Blow {
+    BailiffLunge,
+    CensorBolt,
+    PostmasterRing,
+    PostmasterCharge,
+    PostmasterFan,
+    /// The ring released as the Postmaster recovers from its half-hull stagger.
+    PostmasterShockwave,
+}
+
+impl Blow {
+    pub fn attacker(self) -> &'static str {
+        match self {
+            Blow::BailiffLunge => "Bailiff's lunge",
+            Blow::CensorBolt => "Censor's ink bolt",
+            Blow::PostmasterRing => "The Postmaster's ink ring",
+            Blow::PostmasterCharge => "The Postmaster's charge",
+            Blow::PostmasterFan => "The Postmaster's ink fan",
+            Blow::PostmasterShockwave => "The Postmaster's stagger shockwave",
+        }
+    }
+
+    /// One counterplay hint that holds for the attack as the engine resolves it.
+    pub fn counterplay(self) -> &'static str {
+        match self {
+            Blow::BailiffLunge => {
+                "Its aim locks just before the lunge. Dash sideways out of the red lane as it fills."
+            }
+            Blow::CensorBolt => {
+                "Bolts fly straight down the marked line. Step off it, or strike to cut the ink out of the air."
+            }
+            Blow::PostmasterRing => {
+                "The ring leaves gaps between its spokes. Stand in one, or dash through the wave as it passes."
+            }
+            Blow::PostmasterCharge => {
+                "The charge runs the whole corridor until it meets a wall. Dash across the lane, not along it."
+            }
+            Blow::PostmasterFan => {
+                "Fan bolts spread apart with distance. Keep back to widen the gaps, or strike them out of the air."
+            }
+            Blow::PostmasterShockwave => {
+                "At half hull it staggers, then bursts a ring. Back away while it rears up and dash through the wave."
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Boon {
     FrankingHammer,
@@ -390,6 +439,8 @@ pub struct Shot {
     pub hostile: bool,
     pub velocity: Vec2,
     pub damage: f32,
+    /// Set on hostile shots: the attack that fired it.
+    pub blow: Option<Blow>,
     life: f32,
     pierce: bool,
     hit_mask: u64,
@@ -419,6 +470,8 @@ pub struct Game {
     pub seal_count: u32,
     pub choices: [Boon; 3],
     pub mods: Mods,
+    /// The hit that emptied the courier's hull this run, if any.
+    pub killing_blow: Option<Blow>,
     owned: u16,
     seed: u64,
     run: u64,
@@ -471,6 +524,7 @@ impl Game {
                 Boon::RegisteredMail,
             ],
             mods: Mods::default(),
+            killing_blow: None,
             owned: 0,
             seed,
             run: 0,
@@ -512,6 +566,7 @@ impl Game {
         self.kills = 0;
         self.seal_count = 0;
         self.mods = Mods::default();
+        self.killing_blow = None;
         self.owned = 0;
         self.wave = 0;
         self.lull = 0.8;
@@ -803,6 +858,7 @@ impl Game {
             hostile: false,
             velocity: dir * CAST_SPEED,
             damage: CAST_DAMAGE * self.mods.cast,
+            blow: None,
             life: 1.3,
             pierce: self.mods.pierce,
             hit_mask: 0,
@@ -810,7 +866,7 @@ impl Game {
     }
 
     /// Returns true when the damage actually landed.
-    fn hurt_player(&mut self, dmg: f32) -> bool {
+    fn hurt_player(&mut self, dmg: f32, blow: Blow) -> bool {
         let p = &mut self.player;
         if p.invuln > 0.0 || p.dash_time > 0.0 || p.hp <= 0.0 {
             return false;
@@ -819,6 +875,9 @@ impl Game {
         p.flash = 1.0;
         p.invuln = HIT_IFRAMES;
         let pos = p.pos;
+        if p.hp <= 0.0 {
+            self.killing_blow = Some(blow);
+        }
         self.effects.push(Effect {
             kind: EffectKind::Hit,
             pos,
@@ -1011,13 +1070,14 @@ impl Game {
         self.enemies.append(&mut self.pending);
     }
 
-    fn fire(&mut self, pos: Vec2, dir: Vec2, speed: f32, dmg: f32, radius: f32) {
+    fn fire(&mut self, pos: Vec2, dir: Vec2, speed: f32, dmg: f32, radius: f32, blow: Blow) {
         self.shots.push(Shot {
             pos,
             radius,
             hostile: true,
             velocity: dir * speed,
             damage: dmg,
+            blow: Some(blow),
             life: 4.0,
             pierce: false,
             hit_mask: 0,
@@ -1042,7 +1102,7 @@ impl Game {
                     e.begin(S_MOVE, 0.0);
                     e.cd = 0.8;
                     let pos = e.pos;
-                    self.ring(pos, 14, 0.0, 4.6, 9.0);
+                    self.ring(pos, 14, 0.0, 4.6, 9.0, Blow::PostmasterShockwave);
                 }
                 return;
             }
@@ -1055,10 +1115,10 @@ impl Game {
         }
     }
 
-    fn ring(&mut self, pos: Vec2, n: u32, offset: f32, speed: f32, dmg: f32) {
+    fn ring(&mut self, pos: Vec2, n: u32, offset: f32, speed: f32, dmg: f32, blow: Blow) {
         for k in 0..n {
             let a = offset + k as f32 * std::f32::consts::TAU / n as f32;
-            self.fire(pos, Vec2::from_angle(a), speed, dmg, 0.2);
+            self.fire(pos, Vec2::from_angle(a), speed, dmg, 0.2, blow);
         }
     }
 
@@ -1089,7 +1149,7 @@ impl Game {
                 e.pos = e.pos + e.dir * (9.5 * DT);
                 if !e.contact_done && dist < e.radius() + PLAYER_RADIUS + 0.1 {
                     e.contact_done = true;
-                    self.hurt_player(14.0);
+                    self.hurt_player(14.0, Blow::BailiffLunge);
                 }
                 if e.timer <= 0.0 {
                     e.begin(S_REC, 0.75);
@@ -1138,7 +1198,8 @@ impl Game {
                     let base = e.dir.angle();
                     for k in 0..n {
                         let off = (k as f32 - (n - 1) as f32 * 0.5) * 0.32;
-                        self.fire(e.pos, Vec2::from_angle(base + off), 4.8, 9.0, 0.17);
+                        let dir = Vec2::from_angle(base + off);
+                        self.fire(e.pos, dir, 4.8, 9.0, 0.17, Blow::CensorBolt);
                     }
                     e.begin(S_REC, 0.5);
                 }
@@ -1193,7 +1254,7 @@ impl Game {
                 let hit_wall = (e.pos - before - e.dir * (7.5 * DT)).len_sq() > 1e-6;
                 if !e.contact_done && dist < e.radius() + PLAYER_RADIUS + 0.1 {
                     e.contact_done = true;
-                    self.hurt_player(22.0);
+                    self.hurt_player(22.0, Blow::PostmasterCharge);
                 }
                 if e.timer <= 0.0 || hit_wall {
                     e.begin(S_REC, 1.0);
@@ -1214,7 +1275,7 @@ impl Game {
             ATT_RING => {
                 let n = if phase2 { 18 } else { 12 };
                 let off = if e.attack_index % 2 == 0 { 0.0 } else { 0.2 };
-                self.ring(e.pos, n, off, 4.2, 9.0);
+                self.ring(e.pos, n, off, 4.2, 9.0, Blow::PostmasterRing);
                 e.begin(S_REC, 0.9);
             }
             ATT_CHARGE => {
@@ -1226,7 +1287,8 @@ impl Game {
                 let base = e.dir.angle();
                 for k in 0..n {
                     let off = (k as f32 - (n - 1) as f32 * 0.5) * 0.26;
-                    self.fire(e.pos, Vec2::from_angle(base + off), 5.0, 9.0, 0.17);
+                    let dir = Vec2::from_angle(base + off);
+                    self.fire(e.pos, dir, 5.0, 9.0, 0.17, Blow::PostmasterFan);
                 }
                 e.begin(S_REC, 0.8);
             }
@@ -1258,9 +1320,9 @@ impl Game {
             if s.life <= 0.0 || s.pos.x.abs() > ARENA + 0.6 || s.pos.y.abs() > ARENA + 0.6 {
                 return false;
             }
-            if s.hostile {
+            if let Some(blow) = s.blow {
                 if (s.pos - self.player.pos).len() < s.radius + PLAYER_RADIUS * 0.85
-                    && self.hurt_player(s.damage)
+                    && self.hurt_player(s.damage, blow)
                 {
                     return false;
                 }
@@ -1535,8 +1597,22 @@ mod tests {
     fn strike_cuts_hostile_shots_in_front_but_not_behind() {
         let mut g = arena_game();
         g.player.pos = Vec2::ZERO;
-        g.fire(Vec2::new(1.0, 0.0), Vec2::new(-1.0, 0.0), 0.0, 9.0, 0.17);
-        g.fire(Vec2::new(-1.0, 0.0), Vec2::new(1.0, 0.0), 0.0, 9.0, 0.17);
+        g.fire(
+            Vec2::new(1.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+            0.0,
+            9.0,
+            0.17,
+            Blow::CensorBolt,
+        );
+        g.fire(
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            0.0,
+            9.0,
+            0.17,
+            Blow::CensorBolt,
+        );
         g.step(Input {
             aim: Vec2::new(3.0, 0.0),
             strike: true,
@@ -1634,12 +1710,90 @@ mod tests {
         let mut g = arena_game();
         g.player.hp = 5.0;
         g.player.pos = Vec2::ZERO;
-        g.fire(Vec2::ZERO, Vec2::new(1.0, 0.0), 0.0, 9.0, 0.17);
+        g.fire(
+            Vec2::ZERO,
+            Vec2::new(1.0, 0.0),
+            0.0,
+            9.0,
+            0.17,
+            Blow::CensorBolt,
+        );
         g.step(idle());
         assert_eq!(g.phase, Phase::Lost);
         let t = g.time;
         g.step(idle());
         assert_eq!(g.time, t);
+    }
+
+    #[test]
+    fn lethal_lunge_is_reported_as_the_killing_blow() {
+        let mut g = arena_game();
+        g.player.pos = Vec2::ZERO;
+        g.player.hp = 10.0;
+        let i = place(&mut g, EnemyKind::Bailiff, Vec2::new(0.55, 0.0));
+        g.enemies[i].dir = Vec2::new(-1.0, 0.0);
+        g.enemies[i].begin(S_ACT, 0.28);
+        g.step(idle());
+        assert_eq!(g.phase, Phase::Lost);
+        assert_eq!(g.killing_blow, Some(Blow::BailiffLunge));
+    }
+
+    #[test]
+    fn lethal_censor_bolt_is_reported_and_a_fresh_run_clears_it() {
+        let mut g = arena_game();
+        g.player.pos = Vec2::ZERO;
+        g.player.hp = 9.0;
+        // A Censor releasing its volley two units away, aimed at the courier.
+        let i = place(&mut g, EnemyKind::Censor, Vec2::new(2.0, 0.0));
+        g.enemies[i].begin(S_WIND, 0.85);
+        g.enemies[i].timer = DT;
+        g.enemies[i].dir = Vec2::new(-1.0, 0.0);
+        for _ in 0..120 {
+            if g.phase == Phase::Lost {
+                break;
+            }
+            g.step(idle());
+            // A non-lethal phase never records a cause.
+            if g.phase == Phase::Combat {
+                assert_eq!(g.killing_blow, None);
+            }
+        }
+        assert_eq!(g.phase, Phase::Lost);
+        assert_eq!(g.killing_blow, Some(Blow::CensorBolt));
+        g.start();
+        assert_eq!(g.killing_blow, None);
+    }
+
+    #[test]
+    fn surviving_a_hit_records_no_killing_blow() {
+        let mut g = arena_game();
+        g.player.pos = Vec2::ZERO;
+        g.fire(
+            Vec2::ZERO,
+            Vec2::new(1.0, 0.0),
+            0.0,
+            9.0,
+            0.17,
+            Blow::PostmasterFan,
+        );
+        g.step(idle());
+        assert_eq!(g.player.hp, PLAYER_HP - 9.0);
+        assert_eq!(g.killing_blow, None);
+    }
+
+    #[test]
+    fn every_killing_blow_has_a_name_and_a_hint() {
+        for blow in [
+            Blow::BailiffLunge,
+            Blow::CensorBolt,
+            Blow::PostmasterRing,
+            Blow::PostmasterCharge,
+            Blow::PostmasterFan,
+            Blow::PostmasterShockwave,
+        ] {
+            assert!(!blow.attacker().is_empty());
+            assert!(blow.counterplay().ends_with('.'));
+        }
     }
 
     #[test]

@@ -453,6 +453,33 @@ fn control_hint(key: &'static str, action: &'static str) -> Div {
         .child(mono(action, 10.0, PEARL_DIM))
 }
 
+/// Defeat-screen panel naming the lethal attack and how to beat it next time.
+fn killing_blow_card(attacker: &'static str, hint: &'static str) -> Div {
+    hud_card()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(6.0))
+        .max_w(px(440.0))
+        .px(px(18.0))
+        .py(px(10.0))
+        .border_color(rgba(0xe03c2866))
+        .child(mono("KILLING BLOW", 9.0, WAX).font_weight(FontWeight::BOLD))
+        .child(
+            serif(attacker, 19.0, PEARL)
+                .font_weight(FontWeight::BOLD)
+                .line_height(px(22.0)),
+        )
+        .child(
+            div()
+                .font_family(MONO)
+                .text_size(px(11.0))
+                .text_color(rgb(PEARL_DIM))
+                .text_center()
+                .child(hint),
+        )
+}
+
 fn roman(n: usize) -> &'static str {
     ["0", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX"]
         .get(n)
@@ -1130,6 +1157,12 @@ impl Shell {
                     .line_height(px(46.0)),
             )
             .child(mono(sub, 11.0, PEARL))
+            .children(
+                self.game
+                    .killing_blow
+                    .filter(|_| !won)
+                    .map(|blow| killing_blow_card(blow.attacker(), blow.counterplay())),
+            )
             .child(rule_alpha(0xede8d833).w(px(280.0)))
             .child(mono(
                 format!(
