@@ -1,0 +1,25 @@
+[package]
+name = "dead-letter"
+version = "0.1.0"
+edition = "2021"
+description = "DEAD LETTER: the Undertow Post. A drowned post office roguelike."
+
+[[bin]]
+name = "dead-letter"
+path = "src/main.rs"
+
+# Windows: GPUI's default features only add Linux backends (wayland/x11) and
+# font-kit, none used by the DirectX/DirectWrite path, so they are disabled.
+# `windows-manifest` embeds the application manifest (DPI awareness, common controls).
+[target.'cfg(windows)'.dependencies]
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+
+[target.'cfg(not(windows))'.dependencies]
+gpui = "0.2.2"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"

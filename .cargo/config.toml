@@ -1,0 +1,3 @@
+[target.x86_64-pc-windows-msvc]
+# The Windows package should not need a separate VC++ Redistributable install.
+rustflags = ["-C", "target-feature=+crt-static"]
