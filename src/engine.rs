@@ -642,6 +642,18 @@ impl Game {
         }
     }
 
+    /// The seed this game was constructed with.
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// Restart the current run in place on the same RNG stream, straight into
+    /// the waves. The drill never changes the seeded run, so it is not replayed.
+    pub fn retry(&mut self) {
+        self.lesson = None;
+        self.fresh_floor();
+    }
+
     /// Begin (or restart) a run at chamber 1.
     pub fn start(&mut self) {
         self.run += 1;
@@ -2056,7 +2068,7 @@ mod tests {
         let foes: Vec<_> = g.enemies.iter().map(|e| (e.kind, e.pos, e.hp)).collect();
         let shots: Vec<_> = g.shots.iter().map(|s| s.pos).collect();
         format!(
-            "{:?} {:?} {} {} {} {} {:?} {:?} {:?} {:?}",
+            "{:?} {:?} {} {} {} {} {:?} {:?} {:?} {:?} {:?}",
             g.phase,
             g.player.pos,
             g.player.hp,
@@ -2066,7 +2078,8 @@ mod tests {
             foes,
             shots,
             g.choices,
-            g.rng
+            g.rng,
+            g.mods
         )
     }
 
@@ -2180,6 +2193,107 @@ mod tests {
         drilled.start_drill();
         assert_eq!(after_drill(&mut drilled), second, "replaying the drill");
         assert_ne!(second, plain);
+    }
+
+    /// One enemy actually emerging from its mark.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Emerged {
+        tick: usize,
+        chamber: usize,
+        kind: EnemyKind,
+        pos: Vec2,
+    }
+
+    /// Emergences and endorsement offers up to the win, driven by fixed ticks
+    /// and instant chamber clears. Everything alive after a step has just
+    /// emerged, since the previous tick's enemies were all felled first.
+    fn run_trace(g: &mut Game) -> (Vec<Emerged>, Vec<[Boon; 3]>) {
+        assert_eq!(g.lesson, None);
+        let mut emerged = Vec::new();
+        let mut offers = Vec::new();
+        for tick in 0..20_000 {
+            for e in g.enemies.iter_mut() {
+                e.hp = 0.0;
+            }
+            g.player.hp = g.player.max_hp;
+            g.step(idle());
+            for e in g.enemies.iter().filter(|e| e.hp > 0.0) {
+                emerged.push(Emerged {
+                    tick,
+                    chamber: g.chamber,
+                    kind: e.kind,
+                    pos: e.pos,
+                });
+            }
+            match g.phase {
+                Phase::Choice => {
+                    offers.push(g.choices);
+                    g.choose(1);
+                }
+                Phase::Won => return (emerged, offers),
+                _ => {}
+            }
+        }
+        panic!("run did not finish");
+    }
+
+    /// A whole run: every wave emerges as one group, with one offer per
+    /// chamber cleared but the last.
+    fn assert_whole_run(emerged: &[Emerged], offers: &[[Boon; 3]]) {
+        let mut groups: Vec<(usize, usize)> = emerged.iter().map(|e| (e.chamber, e.tick)).collect();
+        groups.dedup();
+        let waves: usize = (1..=CHAMBERS).map(waves_in).sum();
+        let bodies: usize = (1..=CHAMBERS)
+            .flat_map(|c| (0..waves_in(c)).map(move |w| wave_kinds(c, w).len()))
+            .sum();
+        assert_eq!(groups.len(), waves);
+        assert_eq!(emerged.len(), bodies);
+        assert_eq!(offers.len(), CHAMBERS - 1);
+    }
+
+    #[test]
+    fn retry_reproduces_spawns_and_offers_and_fresh_runs_differ() {
+        let mut g = Game::new(5);
+        assert_eq!(g.seed(), 5);
+        g.start();
+        let first = run_trace(&mut g);
+        assert_whole_run(&first.0, &first.1);
+        assert_eq!(g.phase, Phase::Won);
+        g.retry();
+        assert_eq!(
+            (g.phase, g.chamber, g.kills, g.seal_count),
+            (Phase::Combat, 1, 0, 0)
+        );
+        assert_eq!(run_trace(&mut g), first, "retry replays the run");
+        assert_eq!(g.seed(), 5);
+        // Retry after several runs keeps the current stream.
+        g.start();
+        let third = run_trace(&mut g);
+        assert_ne!(third, first, "a fresh run differs");
+        g.retry();
+        assert_eq!(run_trace(&mut g), third);
+    }
+
+    #[test]
+    fn retry_skips_the_drill_and_replays_scripted_play_after_a_win() {
+        let play = |g: &mut Game| {
+            for t in 0..1_500 {
+                g.step(scripted(t));
+            }
+            fingerprint(g)
+        };
+        let mut plain = Game::new(5);
+        plain.start();
+        let expected = play(&mut plain);
+
+        // A drilled run, won with endorsements in hand.
+        let mut g = Game::new(5);
+        g.start_drill();
+        g.skip_drill();
+        let _ = run_trace(&mut g);
+        g.retry();
+        assert_eq!(g.lesson, None, "retry goes straight to the waves");
+        assert_eq!(play(&mut g), expected);
     }
 
     #[test]
