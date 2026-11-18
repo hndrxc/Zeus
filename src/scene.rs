@@ -437,7 +437,7 @@ impl Pen<'_> {
         self.win.paint_quad(fill(b, color).corner_radii(px(r)));
     }
 
-    fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Hsla) {
+    fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: impl Into<gpui::Background>) {
         let b = Bounds::new(
             point(
                 px(self.org.0 + self.fit.ox + x * self.fit.s),
@@ -494,29 +494,40 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
 
     // Soften the outer edges of the baked 900x600 plate into the abyss background
     // so full-screen viewports of any aspect ratio blend without a seam.
-    let steps = 8;
     let feather_x = 28.0;
     let feather_y = 18.0;
-    for i in 0..steps {
-        let u = 1.0 - (i as f32 + 0.5) / steps as f32;
-        let a = u * u * 0.48;
-        let dx = feather_x / steps as f32;
-        let dy = feather_y / steps as f32;
-        pen.rect(i as f32 * dx, 0.0, dx + 0.5, DESIGN_H, col(INK, a));
+    let edge = gpui::linear_color_stop(col(INK, 1.0), 0.0);
+    let clear = gpui::linear_color_stop(col(INK, 0.0), 1.0);
+    if fit.ox > 0.0 {
         pen.rect(
-            DESIGN_W - (i as f32 + 1.0) * dx - 0.5,
             0.0,
-            dx + 0.5,
+            0.0,
+            feather_x,
             DESIGN_H,
-            col(INK, a),
+            gpui::linear_gradient(90.0, edge, clear),
         );
-        pen.rect(0.0, i as f32 * dy, DESIGN_W, dy + 0.5, col(INK, a));
+        pen.rect(
+            DESIGN_W - feather_x,
+            0.0,
+            feather_x,
+            DESIGN_H,
+            gpui::linear_gradient(270.0, edge, clear),
+        );
+    }
+    if fit.oy > 0.0 {
         pen.rect(
             0.0,
-            DESIGN_H - (i as f32 + 1.0) * dy - 0.5,
+            0.0,
             DESIGN_W,
-            dy + 0.5,
-            col(INK, a),
+            feather_y,
+            gpui::linear_gradient(180.0, edge, clear),
+        );
+        pen.rect(
+            0.0,
+            DESIGN_H - feather_y,
+            DESIGN_W,
+            feather_y,
+            gpui::linear_gradient(0.0, edge, clear),
         );
     }
 
