@@ -562,6 +562,7 @@ pub struct Game {
     seed: u64,
     run: u64,
     rng: u64,
+    formation_rng: u64,
     wave: usize,
     lull: f32,
     next_id: u32,
@@ -582,15 +583,31 @@ fn waves_in(chamber: usize) -> usize {
     }
 }
 
-fn wave_kinds(chamber: usize, wave: usize) -> &'static [EnemyKind] {
+fn xorshift(mut x: u64) -> u64 {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
+}
+
+/// The authored roster for a wave slot. The opening and finale are fixed;
+/// every slot between has two rosters, chosen by one draw (high bit) from the
+/// formation stream, which play never touches.
+fn wave_kinds(chamber: usize, wave: usize, formation_rng: &mut u64) -> &'static [EnemyKind] {
     use EnemyKind::{Bailiff as B, Censor as C, Postmaster as P};
-    match (chamber, wave) {
-        (1, 0) => &[B, B],
-        (1, _) => &[B, C, B],
-        (2, 0) => &[B, B, C],
-        (2, 1) => &[C, C, B],
-        (2, _) => &[B, B, B, C],
-        _ => &[P],
+    let (first, second): (&'static [EnemyKind], &'static [EnemyKind]) = match (chamber, wave) {
+        (1, 0) => return &[B, B],
+        (1, _) => (&[B, C, B], &[C, B, C]),
+        (2, 0) => (&[B, B, C], &[C, B, C]),
+        (2, 1) => (&[C, C, B], &[B, C, B]),
+        (2, _) => (&[B, B, B, C], &[B, C, B, C]),
+        _ => return &[P],
+    };
+    *formation_rng = xorshift(*formation_rng);
+    if *formation_rng >> 63 == 1 {
+        second
+    } else {
+        first
     }
 }
 
@@ -619,6 +636,7 @@ impl Game {
             seed,
             run: 0,
             rng: 1,
+            formation_rng: 1,
             wave: 0,
             lull: 0.8,
             next_id: 0,
@@ -634,11 +652,15 @@ impl Game {
     }
 
     fn reseed(&mut self) {
-        self.rng = (self.seed ^ self.run.wrapping_mul(0xD1B5_4A32_D192_ED03))
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            | 1;
+        let base = self.seed ^ self.run.wrapping_mul(0xD1B5_4A32_D192_ED03);
+        self.rng = base.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
         for _ in 0..4 {
             self.rand();
+        }
+        // Formation stream: salted, separate state, never touched by play.
+        self.formation_rng = base.wrapping_mul(0xC2B2_AE3D_27D4_EB4F) | 1;
+        for _ in 0..4 {
+            self.formation_rng = xorshift(self.formation_rng);
         }
     }
 
@@ -712,12 +734,8 @@ impl Game {
     }
 
     fn rand(&mut self) -> f32 {
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.rng = x;
-        (x >> 40) as f32 / 16_777_216.0
+        self.rng = xorshift(self.rng);
+        (self.rng >> 40) as f32 / 16_777_216.0
     }
 
     pub fn step(&mut self, input: Input) {
@@ -1153,7 +1171,7 @@ impl Game {
     }
 
     fn spawn_wave(&mut self) {
-        for &kind in wave_kinds(self.chamber, self.wave) {
+        for &kind in wave_kinds(self.chamber, self.wave, &mut self.formation_rng) {
             let r = match kind {
                 EnemyKind::Postmaster => 0.75,
                 _ => 0.38,
@@ -1979,7 +1997,7 @@ mod tests {
         g.start();
         until_marked(&mut g);
         let kinds: Vec<EnemyKind> = g.arrivals.iter().map(|a| a.kind).collect();
-        assert_eq!(kinds, wave_kinds(1, 0));
+        assert_eq!(kinds, [EnemyKind::Bailiff; 2]);
         let marks: Vec<Vec2> = g.arrivals.iter().map(|a| a.pos).collect();
         for m in &marks {
             assert!(
@@ -2031,10 +2049,9 @@ mod tests {
         assert!(g.enemies.is_empty());
         until_marked(&mut g);
         let kinds: Vec<EnemyKind> = g.arrivals.iter().map(|a| a.kind).collect();
-        assert_eq!(
-            kinds,
-            wave_kinds(2, 0),
-            "next chamber starts from its first wave"
+        assert!(
+            [[2, 1, 0], [1, 2, 0]].contains(&mix(kinds.iter().copied())),
+            "next chamber starts from its first wave: {kinds:?}"
         );
 
         g.start();
@@ -2198,57 +2215,200 @@ mod tests {
     /// One enemy actually emerging from its mark.
     #[derive(Clone, Copy, Debug, PartialEq)]
     struct Emerged {
+        id: u32,
         tick: usize,
         chamber: usize,
         kind: EnemyKind,
         pos: Vec2,
     }
 
+    /// Ticks a lone final-wave enemy is kept alive: longer than the lull.
+    const HOLD_TICKS: usize = (LULL / DT) as usize + 10;
+
     /// Emergences and endorsement offers up to the win, driven by fixed ticks
-    /// and instant chamber clears. Everything alive after a step has just
-    /// emerged, since the previous tick's enemies were all felled first.
+    /// and instant clears. Every enemy is felled at once except, in each
+    /// chamber's final wave, one survivor kept alive past the lull: the
+    /// chamber must stay in Combat meanwhile, then reach Choice (or Won after
+    /// the boss) only once it is felled.
     fn run_trace(g: &mut Game) -> (Vec<Emerged>, Vec<[Boon; 3]>) {
         assert_eq!(g.lesson, None);
-        let mut emerged = Vec::new();
+        let mut emerged: Vec<Emerged> = Vec::new();
         let mut offers = Vec::new();
+        let mut held = 0;
         for tick in 0..20_000 {
-            for e in g.enemies.iter_mut() {
-                e.hp = 0.0;
-            }
             g.player.hp = g.player.max_hp;
+            let holding = g.wave == waves_in(g.chamber)
+                && g.arrivals.is_empty()
+                && !g.enemies.is_empty()
+                && held < HOLD_TICKS;
+            let spared = g.enemies.len().saturating_sub(1);
+            for (i, e) in g.enemies.iter_mut().enumerate() {
+                if !(holding && i == spared) {
+                    e.hp = 0.0;
+                }
+            }
+            if holding {
+                held += 1;
+            }
             g.step(idle());
+            if holding {
+                assert_eq!(
+                    g.phase,
+                    Phase::Combat,
+                    "left chamber {} with a clerk alive",
+                    g.chamber
+                );
+                assert!(g.enemies.iter().any(|e| e.hp > 0.0));
+            }
             for e in g.enemies.iter().filter(|e| e.hp > 0.0) {
-                emerged.push(Emerged {
-                    tick,
-                    chamber: g.chamber,
-                    kind: e.kind,
-                    pos: e.pos,
-                });
+                if !emerged
+                    .iter()
+                    .any(|x| x.chamber == g.chamber && x.id == e.id)
+                {
+                    emerged.push(Emerged {
+                        id: e.id,
+                        tick,
+                        chamber: g.chamber,
+                        kind: e.kind,
+                        pos: e.pos,
+                    });
+                }
             }
             match g.phase {
                 Phase::Choice => {
+                    assert_eq!(
+                        held, HOLD_TICKS,
+                        "chamber {} was never held open",
+                        g.chamber
+                    );
+                    assert!(g.enemies.is_empty() && g.arrivals.is_empty());
+                    held = 0;
                     offers.push(g.choices);
                     g.choose(1);
                 }
-                Phase::Won => return (emerged, offers),
+                Phase::Won => {
+                    assert_eq!(held, HOLD_TICKS, "the boss was never held open");
+                    return (emerged, offers);
+                }
                 _ => {}
             }
         }
         panic!("run did not finish");
     }
 
+    /// Body counts `[bailiffs, censors, postmasters]`.
+    fn mix(kinds: impl IntoIterator<Item = EnemyKind>) -> [usize; 3] {
+        let mut n = [0; 3];
+        for k in kinds {
+            n[match k {
+                EnemyKind::Bailiff => 0,
+                EnemyKind::Censor => 1,
+                EnemyKind::Postmaster => 2,
+            }] += 1;
+        }
+        n
+    }
+
+    /// Each wave that actually emerged, as `(chamber, mix)`, in order.
+    fn wave_mixes(emerged: &[Emerged]) -> Vec<(usize, [usize; 3])> {
+        let mut out: Vec<(usize, [usize; 3])> = Vec::new();
+        let mut last = None;
+        for e in emerged {
+            let key = (e.chamber, e.tick);
+            let m = mix([e.kind]);
+            if last == Some(key) {
+                let tail = out.last_mut().unwrap();
+                for i in 0..3 {
+                    tail.1[i] += m[i];
+                }
+            } else {
+                out.push((e.chamber, m));
+                last = Some(key);
+            }
+        }
+        out
+    }
+
     /// A whole run: every wave emerges as one group, with one offer per
-    /// chamber cleared but the last.
+    /// chamber cleared but the last. The opening and finale are fixed; every
+    /// slot between holds one of its two authored mixes.
     fn assert_whole_run(emerged: &[Emerged], offers: &[[Boon; 3]]) {
-        let mut groups: Vec<(usize, usize)> = emerged.iter().map(|e| (e.chamber, e.tick)).collect();
-        groups.dedup();
-        let waves: usize = (1..=CHAMBERS).map(waves_in).sum();
-        let bodies: usize = (1..=CHAMBERS)
-            .flat_map(|c| (0..waves_in(c)).map(move |w| wave_kinds(c, w).len()))
-            .sum();
-        assert_eq!(groups.len(), waves);
-        assert_eq!(emerged.len(), bodies);
+        let waves = wave_mixes(emerged);
+        let chambers: Vec<usize> = (1..=CHAMBERS)
+            .flat_map(|c| (0..waves_in(c)).map(move |_| c))
+            .collect();
+        assert_eq!(
+            waves.iter().map(|w| w.0).collect::<Vec<_>>(),
+            chambers,
+            "waves per chamber"
+        );
+        assert_eq!(waves[0].1, [2, 0, 0], "opening is two Bailiffs");
+        assert_eq!(
+            waves[waves.len() - 1].1,
+            [0, 0, 1],
+            "finale is the Postmaster"
+        );
+        let options = [
+            [[2, 1, 0], [1, 2, 0]],
+            [[2, 1, 0], [1, 2, 0]],
+            [[1, 2, 0], [2, 1, 0]],
+            [[3, 1, 0], [2, 2, 0]],
+        ];
+        for (got, opts) in waves[1..waves.len() - 1].iter().zip(&options) {
+            assert!(
+                opts.contains(&got.1),
+                "emerged {:?}, expected one of {opts:?}",
+                got.1
+            );
+        }
         assert_eq!(offers.len(), CHAMBERS - 1);
+    }
+
+    fn mixes_for(seed: u64) -> Vec<(usize, [usize; 3])> {
+        let mut g = Game::new(seed);
+        g.start();
+        let (emerged, offers) = run_trace(&mut g);
+        assert_whole_run(&emerged, &offers);
+        wave_mixes(&emerged)
+    }
+
+    #[test]
+    fn rosters_follow_the_seed_and_vary_in_every_later_slot() {
+        let seeds: Vec<u64> = (1..=16).collect();
+        let runs: Vec<_> = seeds.iter().map(|&s| mixes_for(s)).collect();
+        for (&s, run) in seeds.iter().zip(&runs) {
+            assert_eq!(&mixes_for(s), run, "seed {s} is reproducible");
+        }
+        for slot in 1..=4 {
+            let mut seen: Vec<[usize; 3]> = Vec::new();
+            for run in &runs {
+                if !seen.contains(&run[slot].1) {
+                    seen.push(run[slot].1);
+                }
+            }
+            assert_eq!(seen.len(), 2, "slot {slot} never varied across seeds");
+        }
+        assert!(runs.iter().any(|r| r != &runs[0]));
+    }
+
+    #[test]
+    fn rosters_do_not_depend_on_placement_or_combat_draws() {
+        let mut plain = Game::new(9);
+        plain.start();
+        let (a, _) = run_trace(&mut plain);
+        let mut perturbed = Game::new(9);
+        perturbed.start();
+        for _ in 0..7 {
+            perturbed.rand();
+        }
+        let (b, _) = run_trace(&mut perturbed);
+        assert_eq!(wave_mixes(&a), wave_mixes(&b));
+        let kinds = |t: &[Emerged]| t.iter().map(|e| e.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(&a), kinds(&b));
+        assert!(
+            a.iter().zip(&b).any(|(x, y)| x.pos != y.pos),
+            "placement did move"
+        );
     }
 
     #[test]
@@ -2258,6 +2418,7 @@ mod tests {
         g.start();
         let first = run_trace(&mut g);
         assert_whole_run(&first.0, &first.1);
+        assert_eq!(wave_mixes(&first.0).len(), 6);
         assert_eq!(g.phase, Phase::Won);
         g.retry();
         assert_eq!(
