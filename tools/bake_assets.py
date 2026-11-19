@@ -79,6 +79,9 @@ def P():
         red_l=mat("red_l", (1.0, 0.1, 0.05), 0.0, 0.3, emit=(1.0, 0.08, 0.04), strength=7.0),
         dim_b=mat("dim_b", (0.2, 0.5, 0.5), 0.0, 0.5, emit=(0.2, 0.55, 0.55), strength=0.7),
         dial=mat("dial", (0.8, 0.8, 0.6), 0.0, 0.4, emit=(0.8, 0.85, 0.6), strength=1.8),
+        gunmetal=mat("gunmetal", (0.055, 0.065, 0.075), 0.9, 0.42),
+        amethyst=mat("amethyst", (0.16, 0.05, 0.22), 0.05, 0.26, coat=0.8),
+        lilac=mat("lilac", (0.62, 0.42, 1.0), 0.0, 0.35, emit=(0.58, 0.34, 1.0), strength=5.0),
     )
 
 
@@ -846,6 +849,7 @@ def main():
         "bailiff": lambda: bake_enemy("bailiff", build_bailiff, engine),
         "censor": lambda: bake_enemy("censor", build_censor, engine),
         "postmaster": lambda: bake_enemy("postmaster", build_postmaster, engine),
+        "ward_clerk": lambda: bake_ward_clerk(engine),
     }
     for k, f in jobs.items():
         if not only or k in only:
@@ -856,6 +860,13 @@ def bake_courier(engine):
     import runpy
     script = os.path.join(ROOT, "tools", "courier.py")
     runpy.run_path(script, init_globals=globals())["bake"](engine)
+
+
+def bake_ward_clerk(engine):
+    import runpy
+    script = os.path.join(ROOT, "tools", "ward_clerk.py")
+    builder = runpy.run_path(script, init_globals=globals())["build_rig"]
+    bake_enemy("ward_clerk", builder, engine)
 
 
 if __name__ == "__main__":

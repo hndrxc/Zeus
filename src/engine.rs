@@ -136,11 +136,20 @@ pub enum Phase {
     Lost,
 }
 
+/// Ward Clerk: radius within which it shields its nearest ally.
+const WARD_RANGE: f32 = 2.4;
+/// Share of damage a warded ally still takes.
+const WARD_TAKEN: f32 = 0.4;
+/// A Ward Clerk walks toward its ally while farther than this.
+const WARD_FOLLOW: f32 = 1.7;
+const WARD_SPEED: f32 = 1.5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnemyKind {
     Bailiff,
     Censor,
     Postmaster,
+    WardClerk,
 }
 
 impl EnemyKind {
@@ -149,6 +158,7 @@ impl EnemyKind {
             EnemyKind::Bailiff => 0.38,
             EnemyKind::Censor => 0.32,
             EnemyKind::Postmaster => 0.75,
+            EnemyKind::WardClerk => 0.34,
         }
     }
 }
@@ -491,6 +501,18 @@ impl Enemy {
         self.hp > 0.0 && self.state != S_EMERGE && self.state != S_TRANS
     }
 
+    /// A live, emerged Bailiff or Censor: the only clerks a ward can cover.
+    fn can_be_warded(&self) -> bool {
+        matches!(self.kind, EnemyKind::Bailiff | EnemyKind::Censor)
+            && self.hp > 0.0
+            && !self.emerging
+    }
+
+    /// A live, emerged Ward Clerk.
+    fn wards_others(&self) -> bool {
+        self.kind == EnemyKind::WardClerk && self.hp > 0.0 && !self.emerging
+    }
+
     /// Angle of the first bolt in the boss ring being wound up; alternate rings
     /// rotate by 0.2 rad so the gaps move.
     pub fn ring_offset(&self) -> f32 {
@@ -583,6 +605,23 @@ fn waves_in(chamber: usize) -> usize {
     }
 }
 
+/// Index of the nearest wardable clerk to `from` and its squared distance;
+/// ties go to the lower id.
+fn nearest_ally(enemies: &[Enemy], from: Vec2) -> Option<(usize, f32)> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, a) in enemies
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.can_be_warded())
+    {
+        let d = (a.pos - from).len_sq();
+        if best.map_or(true, |(b, bd)| d < bd || (d == bd && a.id < enemies[b].id)) {
+            best = Some((i, d));
+        }
+    }
+    best
+}
+
 fn xorshift(mut x: u64) -> u64 {
     x ^= x << 13;
     x ^= x >> 7;
@@ -594,13 +633,13 @@ fn xorshift(mut x: u64) -> u64 {
 /// every slot between has two rosters, chosen by one draw (high bit) from the
 /// formation stream, which play never touches.
 fn wave_kinds(chamber: usize, wave: usize, formation_rng: &mut u64) -> &'static [EnemyKind] {
-    use EnemyKind::{Bailiff as B, Censor as C, Postmaster as P};
+    use EnemyKind::{Bailiff as B, Censor as C, Postmaster as P, WardClerk as W};
     let (first, second): (&'static [EnemyKind], &'static [EnemyKind]) = match (chamber, wave) {
         (1, 0) => return &[B, B],
         (1, _) => (&[B, C, B], &[C, B, C]),
         (2, 0) => (&[B, B, C], &[C, B, C]),
-        (2, 1) => (&[C, C, B], &[B, C, B]),
-        (2, _) => (&[B, B, B, C], &[B, C, B, C]),
+        (2, 1) => (&[C, W, B], &[B, W, B]),
+        (2, _) => (&[B, B, W, C], &[B, C, W, C]),
         _ => return &[P],
     };
     *formation_rng = xorshift(*formation_rng);
@@ -937,6 +976,7 @@ impl Game {
     fn dash_lash(&mut self) {
         let pp = self.player.pos;
         let dir = self.player.dash_dir;
+        let warded = self.warded_mask();
         for i in 0..self.enemies.len() {
             let e = &self.enemies[i];
             if e.dash_stamp == self.dash_stamp || !e.hittable() {
@@ -944,7 +984,7 @@ impl Game {
             }
             if (e.pos - pp).len() < e.radius() + PLAYER_RADIUS + 0.2 {
                 self.enemies[i].dash_stamp = self.dash_stamp;
-                self.damage_enemy(i, 14.0, dir, 0.9);
+                self.damage_enemy(i, 14.0, dir, 0.9, warded);
             }
         }
     }
@@ -980,6 +1020,7 @@ impl Game {
             duration: if step == 2 { 0.28 } else { 0.2 },
             radius: range,
         });
+        let warded = self.warded_mask();
         for i in 0..self.enemies.len() {
             let e = &self.enemies[i];
             if !e.hittable() {
@@ -988,7 +1029,7 @@ impl Game {
             let to = e.pos - pp;
             let d = to.len();
             if d <= range + e.radius() && (d < 0.01 || to.dot(facing) >= cos_arc * d) {
-                self.damage_enemy(i, dmg, facing, kb);
+                self.damage_enemy(i, dmg, facing, kb, warded);
             }
         }
         // The blade also cuts hostile ink out of the air.
@@ -1056,11 +1097,40 @@ impl Game {
         true
     }
 
-    fn damage_enemy(&mut self, i: usize, dmg: f32, dir: Vec2, knock: f32) -> bool {
-        let e = &mut self.enemies[i];
-        if !e.hittable() {
+    /// Live `(source, ally)` index pairs into `enemies`: each live, emerged
+    /// Ward Clerk and the nearest live, emerged Bailiff or Censor within
+    /// `WARD_RANGE`. Computed from current state on every call, so a ward ends
+    /// the moment its source dies or its ally dies or leaves range.
+    pub fn wards(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.enemies
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.wards_others())
+            .filter_map(move |(si, s)| {
+                let (ai, d) = nearest_ally(&self.enemies, s.pos)?;
+                (d <= WARD_RANGE * WARD_RANGE).then_some((si, ai))
+            })
+    }
+
+    /// Bit `i` is set while `enemies[i]` is warded. Each strike, dash or bolt
+    /// takes one before it lands, so all of its targets meet the wards as they
+    /// stood, whatever their order in `enemies` or whichever falls first.
+    fn warded_mask(&self) -> u64 {
+        self.wards().fold(0, |m, (_, a)| m | (1 << a))
+    }
+
+    /// `warded` is a `warded_mask` taken before the attack that deals `dmg`.
+    fn damage_enemy(&mut self, i: usize, dmg: f32, dir: Vec2, knock: f32, warded: u64) -> bool {
+        if !self.enemies[i].hittable() {
             return false;
         }
+        // Any number of wards still cuts damage only once.
+        let dmg = if warded & (1 << i) != 0 {
+            dmg * WARD_TAKEN
+        } else {
+            dmg
+        };
+        let e = &mut self.enemies[i];
         e.hp -= dmg;
         e.flash = 1.0;
         let boss = e.kind == EnemyKind::Postmaster;
@@ -1105,6 +1175,7 @@ impl Game {
         let hp = match kind {
             EnemyKind::Bailiff => 40.0 * scale,
             EnemyKind::Censor => 26.0 * scale,
+            EnemyKind::WardClerk => 28.0 * scale,
             EnemyKind::Postmaster => 380.0,
         };
         let id = self.next_id;
@@ -1204,16 +1275,23 @@ impl Game {
     fn update_enemies(&mut self) {
         self.live = self.enemies.len();
         let mut enemies = std::mem::take(&mut self.enemies);
-        for e in enemies.iter_mut() {
+        for i in 0..enemies.len() {
+            // `self.enemies` is empty here, so the ward reads its ally from the local vector.
+            let anchor = if enemies[i].wards_others() {
+                nearest_ally(&enemies, enemies[i].pos).map(|(a, _)| enemies[a].pos)
+            } else {
+                None
+            };
+            let e = &mut enemies[i];
             if e.hp > 0.0 {
                 let before = e.pos;
-                if e.state == S_MOVE || e.state == S_EMERGE {
+                if (e.state == S_MOVE || e.state == S_EMERGE) && anchor.is_none() {
                     let target = self.player.pos - e.pos;
                     if target.len_sq() > 0.0001 {
                         e.dir = target.norm();
                     }
                 }
-                self.step_enemy(e);
+                self.step_enemy(e, anchor);
                 let distance = (e.pos - before).len();
                 e.moving = e.state == S_MOVE && distance > 0.0001;
                 if e.moving {
@@ -1274,7 +1352,7 @@ impl Game {
         });
     }
 
-    fn step_enemy(&mut self, e: &mut Enemy) {
+    fn step_enemy(&mut self, e: &mut Enemy, anchor: Option<Vec2>) {
         e.flash = (e.flash - DT / 0.2).max(0.0);
         e.cd = (e.cd - DT).max(0.0);
         e.timer -= DT;
@@ -1309,6 +1387,20 @@ impl Game {
             EnemyKind::Bailiff => self.step_bailiff(e),
             EnemyKind::Censor => self.step_censor(e),
             EnemyKind::Postmaster => self.step_boss(e),
+            EnemyKind::WardClerk => Self::step_ward(e, anchor),
+        }
+    }
+
+    /// Follow the nearest wardable clerk until close, always facing it; with
+    /// no ally, stand facing the courier (`update_enemies` already aimed `dir`).
+    fn step_ward(e: &mut Enemy, anchor: Option<Vec2>) {
+        let Some(at) = anchor else { return };
+        let to = at - e.pos;
+        if to.len_sq() > 0.0001 {
+            e.dir = to.norm();
+        }
+        if e.state == S_MOVE && to.len_sq() > WARD_FOLLOW * WARD_FOLLOW {
+            e.pos = clamp_arena(e.pos + e.dir * (WARD_SPEED * DT), e.radius());
         }
     }
 
@@ -1526,6 +1618,7 @@ impl Game {
                 return true;
             }
             let dir = s.velocity.norm();
+            let warded = self.warded_mask();
             for i in 0..self.enemies.len() {
                 let e = &self.enemies[i];
                 let bit = 1u64 << (e.id % 64);
@@ -1534,7 +1627,7 @@ impl Game {
                 }
                 if (e.pos - s.pos).len() < s.radius + e.radius() {
                     s.hit_mask |= bit;
-                    self.damage_enemy(i, s.damage, dir, 0.15);
+                    self.damage_enemy(i, s.damage, dir, 0.15, warded);
                     if !s.pierce {
                         return false;
                     }
@@ -1718,7 +1811,7 @@ mod tests {
             enemy.dir = Vec2::new(-1.0, 0.0);
             enemy.attack = attack;
             enemy.begin(S_WIND, DT);
-            g.step_enemy(&mut enemy);
+            g.step_enemy(&mut enemy, None);
             assert_eq!(enemy.animation_frame(), expected);
         }
     }
@@ -1918,10 +2011,10 @@ mod tests {
         let mut g = arena_game();
         let i = place(&mut g, EnemyKind::Postmaster, Vec2::new(2.0, 0.0));
         g.enemies[i].hp = g.enemies[i].max_hp * 0.5 + 1.0;
-        assert!(g.damage_enemy(i, 5.0, Vec2::new(1.0, 0.0), 0.0));
+        assert!(g.damage_enemy(i, 5.0, Vec2::new(1.0, 0.0), 0.0, 0));
         assert!(g.enemies[i].phase2);
         let hp = g.enemies[i].hp;
-        assert!(!g.damage_enemy(i, 50.0, Vec2::new(1.0, 0.0), 0.0));
+        assert!(!g.damage_enemy(i, 50.0, Vec2::new(1.0, 0.0), 0.0, 0));
         assert_eq!(g.enemies[i].hp, hp);
     }
 
@@ -2050,7 +2143,7 @@ mod tests {
         until_marked(&mut g);
         let kinds: Vec<EnemyKind> = g.arrivals.iter().map(|a| a.kind).collect();
         assert!(
-            [[2, 1, 0], [1, 2, 0]].contains(&mix(kinds.iter().copied())),
+            [[2, 1, 0, 0], [1, 2, 0, 0]].contains(&mix(kinds.iter().copied())),
             "next chamber starts from its first wave: {kinds:?}"
         );
 
@@ -2296,29 +2389,30 @@ mod tests {
         panic!("run did not finish");
     }
 
-    /// Body counts `[bailiffs, censors, postmasters]`.
-    fn mix(kinds: impl IntoIterator<Item = EnemyKind>) -> [usize; 3] {
-        let mut n = [0; 3];
+    /// Body counts `[bailiffs, censors, postmasters, ward clerks]`.
+    fn mix(kinds: impl IntoIterator<Item = EnemyKind>) -> [usize; 4] {
+        let mut n = [0; 4];
         for k in kinds {
             n[match k {
                 EnemyKind::Bailiff => 0,
                 EnemyKind::Censor => 1,
                 EnemyKind::Postmaster => 2,
+                EnemyKind::WardClerk => 3,
             }] += 1;
         }
         n
     }
 
     /// Each wave that actually emerged, as `(chamber, mix)`, in order.
-    fn wave_mixes(emerged: &[Emerged]) -> Vec<(usize, [usize; 3])> {
-        let mut out: Vec<(usize, [usize; 3])> = Vec::new();
+    fn wave_mixes(emerged: &[Emerged]) -> Vec<(usize, [usize; 4])> {
+        let mut out: Vec<(usize, [usize; 4])> = Vec::new();
         let mut last = None;
         for e in emerged {
             let key = (e.chamber, e.tick);
             let m = mix([e.kind]);
             if last == Some(key) {
                 let tail = out.last_mut().unwrap();
-                for i in 0..3 {
+                for i in 0..4 {
                     tail.1[i] += m[i];
                 }
             } else {
@@ -2342,17 +2436,17 @@ mod tests {
             chambers,
             "waves per chamber"
         );
-        assert_eq!(waves[0].1, [2, 0, 0], "opening is two Bailiffs");
+        assert_eq!(waves[0].1, [2, 0, 0, 0], "opening is two Bailiffs");
         assert_eq!(
             waves[waves.len() - 1].1,
-            [0, 0, 1],
+            [0, 0, 1, 0],
             "finale is the Postmaster"
         );
         let options = [
-            [[2, 1, 0], [1, 2, 0]],
-            [[2, 1, 0], [1, 2, 0]],
-            [[1, 2, 0], [2, 1, 0]],
-            [[3, 1, 0], [2, 2, 0]],
+            [[2, 1, 0, 0], [1, 2, 0, 0]],
+            [[2, 1, 0, 0], [1, 2, 0, 0]],
+            [[1, 1, 0, 1], [2, 0, 0, 1]],
+            [[2, 1, 0, 1], [1, 2, 0, 1]],
         ];
         for (got, opts) in waves[1..waves.len() - 1].iter().zip(&options) {
             assert!(
@@ -2364,7 +2458,7 @@ mod tests {
         assert_eq!(offers.len(), CHAMBERS - 1);
     }
 
-    fn mixes_for(seed: u64) -> Vec<(usize, [usize; 3])> {
+    fn mixes_for(seed: u64) -> Vec<(usize, [usize; 4])> {
         let mut g = Game::new(seed);
         g.start();
         let (emerged, offers) = run_trace(&mut g);
@@ -2380,7 +2474,7 @@ mod tests {
             assert_eq!(&mixes_for(s), run, "seed {s} is reproducible");
         }
         for slot in 1..=4 {
-            let mut seen: Vec<[usize; 3]> = Vec::new();
+            let mut seen: Vec<[usize; 4]> = Vec::new();
             for run in &runs {
                 if !seen.contains(&run[slot].1) {
                     seen.push(run[slot].1);
@@ -2543,5 +2637,211 @@ mod tests {
                 assert!(e.pos.x.abs() <= ARENA && e.pos.y.abs() <= ARENA);
             }
         }
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    fn hit(g: &mut Game, i: usize) -> f32 {
+        let before = g.enemies[i].hp;
+        assert!(g.damage_enemy(i, 10.0, Vec2::new(1.0, 0.0), 0.0, g.warded_mask()));
+        before - g.enemies[i].hp
+    }
+
+    #[test]
+    fn ward_cuts_damage_only_while_the_ally_is_in_range() {
+        let mut g = arena_game();
+        let b = place(&mut g, EnemyKind::Bailiff, Vec2::ZERO);
+        let w = place(&mut g, EnemyKind::WardClerk, Vec2::new(2.39, 0.0));
+        assert_eq!(g.wards().count(), 1);
+        assert!(near(hit(&mut g, b), 4.0), "warded takes 40%");
+        g.enemies[w].pos = Vec2::new(2.41, 0.0);
+        assert_eq!(g.wards().count(), 0);
+        assert!(near(hit(&mut g, b), 10.0), "out of range takes full");
+        g.enemies[w].pos = Vec2::new(0.0, -2.0);
+        assert!(near(hit(&mut g, b), 4.0), "back in range takes 40% again");
+        // The ward itself is never covered.
+        assert!(near(hit(&mut g, w), 10.0));
+    }
+
+    #[test]
+    fn ward_breaks_the_instant_its_source_dies() {
+        let mut g = arena_game();
+        let b = place(&mut g, EnemyKind::Censor, Vec2::ZERO);
+        let w = place(&mut g, EnemyKind::WardClerk, Vec2::new(1.5, 0.0));
+        assert!(near(hit(&mut g, b), 4.0));
+        // Fell the source; it has not been removed yet.
+        assert!(g.damage_enemy(w, 1000.0, Vec2::new(1.0, 0.0), 0.0, g.warded_mask()));
+        assert!(g.enemies[w].hp <= 0.0);
+        assert_eq!(g.wards().count(), 0);
+        assert!(near(hit(&mut g, b), 10.0), "full damage at once");
+    }
+
+    #[test]
+    fn ward_holds_through_the_strike_that_fells_its_source() {
+        // One swing reaches both and fells the source. Its ally's cut must not
+        // depend on which of the two comes first in `enemies`.
+        for source_first in [true, false] {
+            let mut g = arena_game();
+            g.player.pos = Vec2::ZERO;
+            g.player.facing = Vec2::new(1.0, 0.0);
+            let (w, b) = if source_first {
+                let w = place(&mut g, EnemyKind::WardClerk, Vec2::new(1.0, 0.4));
+                (w, place(&mut g, EnemyKind::Bailiff, Vec2::new(1.0, -0.4)))
+            } else {
+                let b = place(&mut g, EnemyKind::Bailiff, Vec2::new(1.0, -0.4));
+                (place(&mut g, EnemyKind::WardClerk, Vec2::new(1.0, 0.4)), b)
+            };
+            g.enemies[w].hp = 1.0;
+            let before = g.enemies[b].hp;
+            g.do_strike();
+            assert!(g.enemies[w].hp <= 0.0, "the strike fells the source");
+            assert!(
+                near(before - g.enemies[b].hp, 14.0 * g.mods.strike * WARD_TAKEN),
+                "source first: {source_first}"
+            );
+        }
+    }
+
+    #[test]
+    fn ward_ignores_emerging_and_ineligible_clerks() {
+        let mut g = arena_game();
+        let w = place(&mut g, EnemyKind::WardClerk, Vec2::ZERO);
+        let boss = place(&mut g, EnemyKind::Postmaster, Vec2::new(0.8, 0.0));
+        place(&mut g, EnemyKind::WardClerk, Vec2::new(0.0, 1.0));
+        // A Bailiff still rising from the floor.
+        let rising = g.make_enemy(EnemyKind::Bailiff, Vec2::new(-1.0, 0.0));
+        g.enemies.push(rising);
+        assert_eq!(g.wards().count(), 0);
+        assert!(near(hit(&mut g, boss), 10.0));
+        // An eligible Bailiff farther away is warded past the ineligible ones.
+        let b = place(&mut g, EnemyKind::Bailiff, Vec2::new(2.0, 0.0));
+        let pairs: Vec<usize> = g.wards().filter(|&(s, _)| s == w).map(|(_, a)| a).collect();
+        assert_eq!(pairs, [b]);
+        // An emerging source wards nothing.
+        let mut g = arena_game();
+        let src = g.make_enemy(EnemyKind::WardClerk, Vec2::ZERO);
+        g.enemies.push(src);
+        place(&mut g, EnemyKind::Bailiff, Vec2::new(1.0, 0.0));
+        assert_eq!(g.wards().count(), 0);
+    }
+
+    #[test]
+    fn ward_covers_only_the_nearest_ally_and_never_stacks() {
+        let mut g = arena_game();
+        let w = place(&mut g, EnemyKind::WardClerk, Vec2::ZERO);
+        let near_b = place(&mut g, EnemyKind::Bailiff, Vec2::new(1.0, 0.0));
+        let far_b = place(&mut g, EnemyKind::Bailiff, Vec2::new(-2.0, 0.0));
+        assert_eq!(g.wards().count(), 1);
+        assert!(near(hit(&mut g, far_b), 10.0));
+        assert!(near(hit(&mut g, near_b), 4.0));
+        // A second ward on the same ally changes nothing.
+        place(&mut g, EnemyKind::WardClerk, Vec2::new(1.0, 1.0));
+        assert_eq!(g.wards().count(), 2);
+        assert!(near(hit(&mut g, near_b), 4.0), "no stacking");
+        // Equal distance: the lower id wins.
+        g.enemies[far_b].pos = Vec2::new(-1.0, 0.0);
+        let target = g.wards().find(|&(s, _)| s == w).unwrap().1;
+        assert_eq!(
+            g.enemies[target].id,
+            g.enemies[near_b].id.min(g.enemies[far_b].id)
+        );
+    }
+
+    #[test]
+    fn ward_clerk_follows_slowly_stands_close_and_faces_the_courier_alone() {
+        let mut g = arena_game();
+        g.player.pos = Vec2::new(-6.0, 0.0);
+        let b = place(&mut g, EnemyKind::Bailiff, Vec2::ZERO);
+        g.enemies[b].begin(S_REC, 100.0);
+        let w = place(&mut g, EnemyKind::WardClerk, Vec2::new(3.0, 0.0));
+        let start = g.enemies[w].pos;
+        g.step(idle());
+        let moved = (g.enemies[w].pos - start).len();
+        assert!(
+            moved > 0.0 && moved <= WARD_SPEED * DT + 1e-4,
+            "slower than a Bailiff"
+        );
+        assert!((1..=8).contains(&g.enemies[w].animation_frame()));
+        assert!(g.enemies[w].dir.x < -0.99, "faces its ally while following");
+        for _ in 0..200 {
+            g.step(idle());
+        }
+        let d = (g.enemies[w].pos - g.enemies[b].pos).len();
+        assert!(d > 0.9 && d <= WARD_FOLLOW + 1e-3, "settles close: {d}");
+        assert_eq!(g.enemies[w].animation_frame(), 0, "stands when close");
+        // Close enough to stand still, it still faces its ally, not the courier.
+        let mut g = arena_game();
+        g.player.pos = Vec2::new(6.0, 0.0);
+        let b = place(&mut g, EnemyKind::Bailiff, Vec2::ZERO);
+        g.enemies[b].begin(S_REC, 100.0);
+        let w = place(&mut g, EnemyKind::WardClerk, Vec2::new(1.0, 0.0));
+        g.step(idle());
+        assert!(g.enemies[w].dir.x < -0.99);
+        // Alone, it stands and faces the courier.
+        let mut g = arena_game();
+        g.player.pos = Vec2::new(-1.0, 2.0);
+        let w = place(&mut g, EnemyKind::WardClerk, Vec2::new(3.0, 2.0));
+        for _ in 0..10 {
+            g.step(idle());
+        }
+        assert_eq!(g.enemies[w].pos, Vec2::new(3.0, 2.0));
+        assert!(g.enemies[w].dir.x < -0.99);
+        assert_eq!(g.enemies[w].animation_frame(), 0);
+    }
+
+    #[test]
+    fn vault_wave_with_a_ward_clerk_only_clears_when_it_falls_too() {
+        let mut g = Game::new(3);
+        g.start();
+        g.chamber = 2;
+        g.wave = 2;
+        g.lull = 0.0;
+        let mut landed = false;
+        for _ in 0..600 {
+            g.player.hp = g.player.max_hp;
+            g.step(idle());
+            if g.arrivals.is_empty()
+                && g.enemies.len() == 4
+                && g.enemies.iter().all(|e| !e.emerging)
+            {
+                landed = true;
+                break;
+            }
+        }
+        assert!(landed, "final Vault wave never fully emerged");
+        assert_eq!(g.wave, 3);
+        assert_eq!(
+            g.enemies
+                .iter()
+                .filter(|e| e.kind == EnemyKind::WardClerk)
+                .count(),
+            1
+        );
+        for e in g
+            .enemies
+            .iter_mut()
+            .filter(|e| e.kind != EnemyKind::WardClerk)
+        {
+            e.hp = 0.0;
+        }
+        for _ in 0..HOLD_TICKS * 2 {
+            g.player.hp = g.player.max_hp;
+            g.step(idle());
+            assert_eq!(g.phase, Phase::Combat, "support still counts as alive");
+            assert_eq!(g.enemies.len(), 1);
+        }
+        g.enemies[0].hp = 0.0;
+        for _ in 0..HOLD_TICKS * 2 {
+            g.player.hp = g.player.max_hp;
+            g.step(idle());
+            if g.phase == Phase::Choice {
+                break;
+            }
+        }
+        assert_eq!(g.phase, Phase::Choice);
+        assert_eq!(g.chamber, 2);
+        assert_eq!(g.kills, 4);
     }
 }

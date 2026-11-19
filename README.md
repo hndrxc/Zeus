@@ -28,7 +28,7 @@ The results screen shows the full delivery seed. A same-seed retry goes straight
 ## A delivery from start to finish
 
 1. **Sorting Floor.** The first delivery of a session opens with a short drill: strike, cast, then dash, each prompted at the bottom of the screen. Waves hold until the drill ends, and finishing or skipping it leaves the seeded run unchanged. Then clear two waves. The opening wave is two Bailiffs, who wind up before lunging, giving you time to sidestep or dash. Censors introduce ranged fire in the second wave. Later non-boss waves vary the mix of melee Bailiffs and ranged Censors by the delivery seed, so a same-seed retry keeps the same formations.
-2. **Dead Letter Vault.** Look for the sealed door and locks behind the floor. Clear three waves of mixed clerks. After each of the first two chambers, pick one of three endorsements. The choice applies for the run, and entering the next chamber restores 25 HP up to your maximum.
+2. **Dead Letter Vault.** Look for the sealed door and locks behind the floor. Clear three waves of mixed clerks. The second and third Vault waves each bring a Ward Clerk, a support enemy that shields the nearest nearby Bailiff or Censor; that recipient takes 60% less damage. A diamond marks the Ward Clerk, a shield marks the protected recipient, and a lavender tether shows the active connection. Defeating the Ward Clerk or separating the two drops the protection, so chase the Ward Clerk or pull the recipient away. Support placement follows the delivery seed like the rest of the wave mix, so a same-seed retry keeps the same formations. After each of the first two chambers, pick one of three endorsements. The choice applies for the run, and entering the next chamber restores 25 HP up to your maximum.
 3. **Postmaster’s Office.** Look for the postmaster’s desk and crest behind the floor. Face the Postmaster. At half health the boss briefly becomes invulnerable and begins its second shift. Watch the floor markings for charge lanes and projectile patterns.
 
 ## Build and test
@@ -40,7 +40,7 @@ cargo build --release --locked
 .\target\release\dead-letter.exe
 ```
 
-For the edit-and-run loop, use `cargo run --locked`. To run the simulation tests with the release profile, use `cargo test --release --locked`. The tests exercise seeded replay, combat timing, projectile interactions, arena bounds and run progression. For a crash during startup or play, the panic hook writes the latest panic to `$env:TEMP\dead-letter-crash.log` on Windows.
+For the edit-and-run loop, use `cargo run --locked`. To run the simulation tests with the release profile, use `cargo test --release --locked`. The tests exercise seeded replay, combat timing, projectile interactions, Ward Clerk protection, arena bounds and run progression. For a crash during startup or play, the panic hook writes the latest panic to `$env:TEMP\dead-letter-crash.log` on Windows.
 
 ## CI and releases
 
@@ -66,10 +66,13 @@ Ordinary builds use the supplied PNGs. To change generated art, edit the procedu
 # Rebuild just the courier with the default Cycles renderer
 blender -b -P tools/bake_assets.py -- --only courier
 
-# Rebuild the three arena PNGs and all four characters
+# Rebuild just the Ward Clerk support enemy
+blender -b -P tools/bake_assets.py -- --only ward_clerk
+
+# Rebuild the three arena PNGs and all five characters
 blender -b -P tools/bake_assets.py
 ```
 
 Character bakes render Cycles on the first GPU backend Blender finds (OptiX, CUDA, HIP, oneAPI or Metal), denoise there too, and fall back to the CPU without one. Chamber backgrounds always render on the CPU, because overlapping faces on the platform lip and the Sorting Floor rack render differently on the GPU and would change the committed art.
 
-The available jobs are `arena`, `courier`, `bailiff`, `censor` and `postmaster`. To rebuild only the chamber art, run `blender -b -P tools/bake_assets.py -- --only arena`. It writes `assets/arena.png` (Sorting Floor), `assets/arena_vault.png` (Dead Letter Vault) and `assets/arena_office.png` (Postmaster’s Office). All three are 2700 × 1800 and share one registration to the 900 × 600 design space. Each 768 × 768 character frame represents a 256 × 256 sprite in that space. Each character has four orthographic views. Rebuild the executable after a bake to pick up changed PNGs.
+The available jobs are `arena`, `courier`, `bailiff`, `censor`, `ward_clerk` and `postmaster`. To rebuild only the chamber art, run `blender -b -P tools/bake_assets.py -- --only arena`. It writes `assets/arena.png` (Sorting Floor), `assets/arena_vault.png` (Dead Letter Vault) and `assets/arena_office.png` (Postmaster’s Office). All three are 2700 × 1800 and share one registration to the 900 × 600 design space. Each 768 × 768 character frame represents a 256 × 256 sprite in that space. Each character has four orthographic views. Rebuild the executable after a bake to pick up changed PNGs.

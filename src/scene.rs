@@ -56,6 +56,9 @@ const TEAL_DEEP: u32 = 0x0b3d3b;
 const WAX: u32 = 0xd2301f;
 const BRASS: u32 = 0xe6c43a;
 const INK: u32 = 0x060f12;
+/// Ward tether and badge: violet, never wax-red (red means "attack").
+const WARD: u32 = 0xb08cf0;
+const WARD_DEEP: u32 = 0x3a1f78;
 
 static ARENA_IMG: LazyLock<Arc<Image>> =
     LazyLock::new(|| png(include_bytes!("../assets/arena.png")));
@@ -81,6 +84,21 @@ static COURIER_FRAMES: LazyLock<[[Arc<Image>; 19]; 4]> = LazyLock::new(|| {
         courier_direction!("1"),
         courier_direction!("2"),
         courier_direction!("3"),
+    ]
+});
+
+macro_rules! ward_clerk_direction {
+    ($direction:literal) => {
+        sprite_frames!("ward_clerk", $direction; "00","01","02","03","04","05","06","07","08")
+    };
+}
+
+static WARD_CLERK_FRAMES: LazyLock<[[Arc<Image>; 9]; 4]> = LazyLock::new(|| {
+    [
+        ward_clerk_direction!("0"),
+        ward_clerk_direction!("1"),
+        ward_clerk_direction!("2"),
+        ward_clerk_direction!("3"),
     ]
 });
 macro_rules! enemy_direction {
@@ -221,6 +239,7 @@ enum Kind {
     Bailiff,
     Censor,
     Postmaster,
+    WardClerk,
 }
 
 impl Kind {
@@ -229,6 +248,7 @@ impl Kind {
             EnemyKind::Bailiff => Kind::Bailiff,
             EnemyKind::Censor => Kind::Censor,
             EnemyKind::Postmaster => Kind::Postmaster,
+            EnemyKind::WardClerk => Kind::WardClerk,
         }
     }
     fn shadow(self) -> f32 {
@@ -236,6 +256,7 @@ impl Kind {
             Kind::Bailiff => 0.52,
             Kind::Censor => 0.44,
             Kind::Postmaster => 1.0,
+            Kind::WardClerk => 0.46,
         }
     }
     /// Approximate pixel height of the art above the foot (hp bar anchor).
@@ -244,6 +265,7 @@ impl Kind {
             Kind::Bailiff => 84.0,
             Kind::Censor => 78.0,
             Kind::Postmaster => 135.0,
+            Kind::WardClerk => 80.0,
         }
     }
     fn image(self, facing: Vec2, frame: usize) -> Arc<Image> {
@@ -251,6 +273,7 @@ impl Kind {
         match self {
             Kind::Bailiff => BAILIFF_FRAMES[direction][frame].clone(),
             Kind::Censor => CENSOR_FRAMES[direction][frame].clone(),
+            Kind::WardClerk => WARD_CLERK_FRAMES[direction][frame].clone(),
             Kind::Postmaster => POSTMASTER_FRAMES[direction][frame].clone(),
         }
     }
@@ -270,6 +293,10 @@ struct Foe {
     phase2: bool,
     emerging: bool,
     radius: f32,
+    /// Currently linked to a live ward source.
+    warded: bool,
+    /// Currently a live ward source.
+    guarding: bool,
     ring_offset: f32,
     /// Progress of the half-hull stagger that ends in a shockwave ring.
     shock: f32,
@@ -289,6 +316,8 @@ fn foe(e: &Enemy) -> Foe {
         phase2: e.phase2,
         emerging: e.emerging,
         radius: e.radius(),
+        warded: false,
+        guarding: false,
         ring_offset: e.ring_offset(),
         shock: e.shockwave(),
     }
@@ -354,6 +383,8 @@ struct Snapshot {
     aim: Option<Vec2>,
     combat: bool,
     chamber: usize,
+    /// (source, target) indices into `foes`, straight from `Game::wards`.
+    wards: Vec<(usize, usize)>,
 }
 
 fn norm(v: Vec2, fallback: Vec2) -> Vec2 {
@@ -610,6 +641,11 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
     }
     for f in snap.foes.iter().filter(|f| f.emerging) {
         entry_mark(&mut pen, f.pos, f.radius, 1.0, t);
+    }
+
+    // Ward tethers: a violet flow line on the floor, under every red warning.
+    for &(s, d) in &snap.wards {
+        ward_tether(&mut pen, &snap.foes[s], &snap.foes[d], t);
     }
 
     // Enemy telegraphs. Each attack family has its own shape and motion cue so
@@ -971,7 +1007,7 @@ fn paint_front(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
 
     // Enemy health slips: ink plate, wax fill, pearl rim.
     for f in &snap.foes {
-        if !(f.hp < f.max_hp || f.kind == Kind::Postmaster) {
+        if !(f.hp < f.max_hp || f.kind == Kind::Postmaster || f.warded) {
             continue;
         }
         let (fx, fy) = fit.project(f.pos.x, f.pos.y, 0.0);
@@ -985,9 +1021,48 @@ fn paint_front(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
         let h = if f.kind == Kind::Postmaster { 6.0 } else { 4.0 };
         let k = (f.hp / f.max_hp.max(1e-3)).clamp(0.0, 1.0);
         let (x0, y0) = (design_x - w * 0.5, design_y);
-        pen.rect(x0 - 1.0, y0 - 1.0, w + 2.0, h + 2.0, col(PEARL, 0.55));
+        let rim = if f.warded {
+            col(WARD, 1.0)
+        } else {
+            col(PEARL, 0.55)
+        };
+        let rw = if f.warded { 1.6 } else { 1.0 };
+        pen.rect(
+            x0 - rw - 0.6,
+            y0 - rw - 0.6,
+            w + 2.0 * rw + 1.2,
+            h + 2.0 * rw + 1.2,
+            col(INK, 0.9),
+        );
+        pen.rect(x0 - rw, y0 - rw, w + 2.0 * rw, h + 2.0 * rw, rim);
         pen.rect(x0, y0, w, h, col(INK, 0.9));
         pen.rect(x0, y0, w * k, h, col(WAX, 1.0));
+        if f.warded {
+            // Shield glyph left of the bar; shape alone says "protected".
+            let z = (f.kind.height() + 6.0) / 52.0;
+            let c = (f.pos.x, f.pos.y, z);
+            let g = |ox: f32, up: f32| ward_pt(c, -(w * 0.5) - 10.0 + ox, up);
+            let shield = [
+                g(-6.0, 5.0),
+                g(6.0, 5.0),
+                g(6.0, -1.0),
+                g(0.0, -7.5),
+                g(-6.0, -1.0),
+            ];
+            pen.path(&shield, true, None, Some((4.0, col(INK, 0.95))));
+            pen.path(
+                &shield,
+                true,
+                Some(col(WARD, 1.0)),
+                Some((1.2, col(PEARL, 0.95))),
+            );
+            pen.path(
+                &[g(0.0, 3.5), g(0.0, -4.0)],
+                false,
+                None,
+                Some((1.4, col(INK, 0.9))),
+            );
+        }
     }
 
     // Telegraph glints above windup-ing enemies (a brass warning pip).
@@ -998,6 +1073,42 @@ fn paint_front(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
             let z = f.kind.height() / 52.0 + 0.25;
             pen.disc(f.pos.x, f.pos.y, z, 3.0 + 3.0 * w, col(BRASS, 0.9 * blink));
             pen.disc(f.pos.x, f.pos.y, z, 1.4, col(INK, 0.9));
+        }
+    }
+
+    // Ward source badge: a diamond over every surfaced clerk, hollow while it
+    // guards nobody, filled with a core while the link is live.
+    for f in snap.foes.iter() {
+        if f.kind != Kind::WardClerk || f.emerging {
+            continue;
+        }
+        let active = f.guarding;
+        let pulse = 0.5 + 0.5 * (t * 4.0).sin();
+        let c = (f.pos.x, f.pos.y, (f.kind.height() + 20.0) / 52.0);
+        let d = |ox: f32, up: f32| ward_pt(c, ox, up);
+        let (r, hgt) = if active { (8.0, 10.0) } else { (7.0, 9.0) };
+        let dia = [d(0.0, hgt), d(r, 0.0), d(0.0, -hgt), d(-r, 0.0)];
+        pen.path(&dia, true, None, Some((4.5, col(INK, 0.95))));
+        if active {
+            pen.path(
+                &dia,
+                true,
+                Some(col(WARD, 0.85 + 0.15 * pulse)),
+                Some((1.4, col(PEARL, 1.0))),
+            );
+            pen.path(
+                &[d(0.0, 4.0), d(3.0, 0.0), d(0.0, -4.0), d(-3.0, 0.0)],
+                true,
+                Some(col(PEARL, 1.0)),
+                None,
+            );
+        } else {
+            pen.path(
+                &dia,
+                true,
+                Some(col(WARD_DEEP, 0.9)),
+                Some((1.4, col(WARD, 0.95))),
+            );
         }
     }
 }
@@ -1046,7 +1157,12 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         reach: world.mods.reach,
         flash: world.player.flash,
     };
-    let foes: Vec<Foe> = world.enemies.iter().map(foe).collect();
+    let mut foes: Vec<Foe> = world.enemies.iter().map(foe).collect();
+    let wards: Vec<(usize, usize)> = world.wards().collect();
+    for &(s, t) in &wards {
+        foes[s].guarding = true;
+        foes[t].warded = true;
+    }
     let marks: Vec<Mark> = world
         .arrivals
         .iter()
@@ -1099,6 +1215,7 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         time,
         hero,
         foes: foes.clone(),
+        wards,
         marks,
         bolts: bolts.clone(),
         fx: fx.clone(),
@@ -1215,6 +1332,67 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
     root
 }
 
+/// World-space point offset from `c` by screen pixels (`ox` right, `up` up).
+fn ward_pt(c: (f32, f32, f32), ox: f32, up: f32) -> (f32, f32, f32) {
+    // Projection: screen x = 44 * (x + y), screen y drops 52 px per unit z.
+    let k = ox / 88.0;
+    (c.0 + k, c.1 + k, c.2 + up / 52.0)
+}
+
+/// Flow tether on the floor from ward source to warded ally: dark edge, dashed
+/// violet core, beads travelling source -> target, ring under the target.
+fn ward_tether(pen: &mut Pen, src: &Foe, dst: &Foe, t: f32) {
+    let d = Vec2::new(dst.pos.x - src.pos.x, dst.pos.y - src.pos.y);
+    let len = (d.x * d.x + d.y * d.y).sqrt();
+    if len < 1e-3 {
+        return;
+    }
+    let u = Vec2::new(d.x / len, d.y / len);
+    let a = src.radius * 0.6;
+    let b = (len - dst.radius * 0.8).max(a + 0.05);
+    let at = |s: f32| (src.pos.x + u.x * s, src.pos.y + u.y * s, 0.03);
+    pen.line(at(a), at(b), 5.0, col(INK, 0.55));
+    // Marching dashes (shape cue independent of colour).
+    let (dash, gap) = (0.34, 0.2);
+    let mut s = a - ((t * 0.9) % (dash + gap)) + (dash + gap);
+    while s < b {
+        let (s0, s1) = (s.max(a), (s + dash).min(b));
+        if s1 > s0 {
+            pen.line(at(s0), at(s1), 2.4, col(WARD, 0.8));
+        }
+        s += dash + gap;
+    }
+    // Beads carry the direction: source end to target end.
+    for i in 0..4 {
+        let f = (t * 0.6 + i as f32 * 0.25).fract();
+        let p = at(a + (b - a) * f);
+        let fade = (f * PI).sin();
+        pen.disc(p.0, p.1, p.2, 3.6, col(INK, 0.8 * fade));
+        pen.disc(p.0, p.1, p.2, 2.6, col(PEARL, 0.95 * fade));
+    }
+    let pulse = 0.5 + 0.5 * (t * 4.0).sin();
+    pen.arc(
+        dst.pos,
+        dst.radius * 1.0,
+        dst.radius * 1.15,
+        0.0,
+        TAU,
+        0.02,
+        Some(col(WARD, 0.55 + 0.25 * pulse)),
+        Some((1.0, col(INK, 0.6))),
+    );
+    pen.arc(
+        src.pos,
+        src.radius * 0.9,
+        src.radius * 1.05,
+        0.0,
+        TAU,
+        0.02,
+        Some(col(WARD, 0.5)),
+        Some((1.0, col(INK, 0.6))),
+    );
+}
+
 /// Wave entry postmark: a pearl ring sized to the clerk, a brass sweep that
 /// completes as it surfaces, and four ticks that close onto the ring.
 fn entry_mark(pen: &mut Pen, c: Vec2, body: f32, progress: f32, t: f32) {
@@ -1296,6 +1474,7 @@ fn family(f: &Foe, chamber: usize) -> Option<Family> {
         return None;
     }
     Some(match f.kind {
+        Kind::WardClerk => return None,
         Kind::Bailiff => Family::Lunge,
         Kind::Censor => Family::Volley {
             n: if chamber >= 2 { 3 } else { 1 },
