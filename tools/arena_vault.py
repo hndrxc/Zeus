@@ -80,6 +80,7 @@ def _deposit_bank(M, x, y, width, height, cols, rows):
 
 
 def build(M):
+    floor_seal(M, "Dead Letter Vault", "HELD IN TRUST", "REGISTER  ·  II")
     _vault_door(M)
     _deposit_bank(M, -4.99, -3.75, 0.95, 0.85, 1, 2)
     _deposit_bank(M, -4.74, 1.25, 1.80, 1.35, 2, 3)

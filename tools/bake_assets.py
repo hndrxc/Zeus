@@ -15,6 +15,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "assets")
 PREVIEW = os.path.join(ROOT, "target", "art_preview")
 ZOOM = 1
+# Preserve the cardinal file indices, then add the four intervening views.
+VIEW_ANGLES = (0, 90, 180, 270, 45, 135, 225, 315)
 # Output pixels per design unit: the scene lays out in a 900x600 design space and
 # stretches it to the window (and to HiDPI), so assets are baked well above 1x.
 SS = 3
@@ -368,6 +370,43 @@ def arena_base(M, rnd):
         box((t * 1.1, -4.21, -0.45), (0.8, 0.03, 0.36), M["teal_d"], bev=0.02, name="panel")
 
 
+def floor_type(u, v, words, size, material, tracking=1.07):
+    x, y = uv(u, v)
+    lettering = text((x, y, .043), words, size, material, rotz=math.pi / 4,
+                     extrude=.001, name="Engraved inscription")
+    face = lettering.data
+    face.font = bpy.data.fonts.load(os.path.join(ROOT, "tools", "fonts", "DejaVuSerif.ttf"),
+                                    check_existing=True)
+    face.space_character = tracking
+    # Restore some cap height lost to the oblique ground-plane projection.
+    lettering.scale.y = 1.35
+    return lettering
+
+
+def floor_seal(M, title, legend, register):
+    gold = mat("satin gold inlay", (.64, .43, .19), metal=.63, rough=.43)
+    shell = mat("aged shell inlay", (.53, .49, .36), metal=.23, rough=.55)
+    # A flush enamel cartouche masks the tile joints behind the letterforms.
+    # Scale its die to the actual title width, including side bearings.
+    title_obj = floor_type(0, .15, title, .54, gold)
+    bpy.context.view_layer.update()
+    width = max(1.55, title_obj.dimensions.x / 2 + .24)
+    enamel = mat("seal enamel", (.022, .070, .073), metal=.22, rough=.48)
+    for z, margin, material in ((.029, .032, M["brass_d"]), (.032, 0, enamel)):
+        die = cyl((0, 0, z), 1, .004, material, rot=(0, 0, math.pi / 4),
+                  seg=96, smooth=False, name="Oval postmark die")
+        die.scale = (width + margin, 1.48 + margin, 1)
+    floor_type(0, .78, register, .18, shell, 1.22)
+    floor_type(0, -.53, legend, .19, shell, 1.12)
+    # Paired hairlines and a lozenge make a small printer's ornament.
+    for v in (-.94, 1.16):
+        for side in (-1, 1):
+            x, y = uv(side * .52, v)
+            box((x, y, .043), (.82, .022, .008), gold, rot=(0, 0, math.pi / 4))
+        x, y = uv(0, v)
+        box((x, y, .043), (.081, .081, .008), gold)
+
+
 def arena_sorting(M, rnd):
     """Sorting Floor only: inscriptions, markings, back/front props and its five
     point lights (three lamp posts, two machinery glows). The Vault and Office
@@ -377,19 +416,13 @@ def arena_sorting(M, rnd):
         text((4.24, t * 1.1, -0.45), "%02d" % (t + 4), 0.22, M["sulfur"], rotz=math.pi / 2, extrude=0.004).rotation_euler = (math.pi / 2, 0, math.pi / 2)
         text((t * 1.1, -4.24, -0.45), "DL-%d" % (t + 4), 0.2, M["pearl"], extrude=0.004).rotation_euler = (math.pi / 2, 0, 0)
 
-    # engraved markings (screen-aligned text)
-    def st(u, v, s, size, m=None, ex=0.006):
-        x, y = uv(u, v)
-        text((x, y, 0.014), s, size, m or M["brass_d"], rotz=math.pi / 4, extrude=ex)
-
-    st(0, 0.30, "DEAD LETTER", 0.44, M["brass"])
-    st(0, -0.10, "THE UNDERTOW POST  -  OFFICE 4417", 0.15, M["pearl"])
-    st(0, 3.7, "SORT BY DEPTH OF LOSS", 0.2)
-    st(0, -3.7, "RETURN TO SENDER", 0.26)
-    st(-3.9, 0.1, "DISPATCH 04", 0.17, M["pearl"])
-    st(3.9, 0.1, "UNDELIVERABLE", 0.17, M["pearl"])
-    st(-2.2, -2.2, "POSTAGE DUE", 0.14, M["sulfur"])
-    st(2.2, 2.2, "NO LIVING ADDRESSEE", 0.14, M["sulfur"])
+    floor_seal(M, "Dead Letter", "THE UNDERTOW POST", "OFFICE  ·  4417")
+    for u, v, words, size in (
+        (0, 3.7, "Sort by Depth of Loss", .27), (0, -3.7, "Return to Sender", .30),
+        (-3.9, .1, "Dispatch 04", .22), (3.9, .1, "Undeliverable", .22),
+        (-2.2, -2.2, "Postage Due", .19), (2.2, 2.2, "No Living Addressee", .19),
+    ):
+        floor_type(u, v, words, size, M["paper"])
     # centre postmark rings and cancellation ticks
     for R, r in ((2.35, 0.035), (1.7, 0.02)):
         torus((0, 0, 0.014), R, r, M["copper"])
@@ -402,11 +435,6 @@ def arena_sorting(M, rnd):
     for k in range(4):
         a = math.pi / 4 + k * math.pi / 2
         box((2.0 * math.cos(a), 2.0 * math.sin(a), 0.014), (0.75, 0.05, 0.012), M["brass_d"], rot=(0, 0, a), name="spoke")
-    # wavy cancel lines (postmark)
-    for k in range(5):
-        for s in range(14):
-            a = (s - 7) * 0.2
-            box((-0.0 + 0, 0, 0), (0.001, 0.001, 0.001), None, name="nul").hide_render = True
     # safety triangles
     for (u, v) in ((-3.0, 2.0), (3.0, -2.0), (3.0, 2.0), (-3.0, -2.0)):
         x, y = uv(u, v)

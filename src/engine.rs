@@ -181,7 +181,7 @@ impl Arrival {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectKind {
-    Strike,
+    Strike(u8),
     Dash,
     Hit,
     Burst,
@@ -378,6 +378,8 @@ pub struct Player {
     strike_cd: f32,
     pub stride_phase: f32,
     pub walking: bool,
+    /// Held chain input during the final ticks before the next swing.
+    pub strike_windup: bool,
     pub attack_pose: Option<(EffectKind, Vec2, f32)>,
     dash_time: f32,
     dash_dir: Vec2,
@@ -406,6 +408,7 @@ impl Player {
             strike_cd: 0.0,
             stride_phase: 0.0,
             walking: false,
+            strike_windup: false,
             attack_pose: None,
             dash_time: 0.0,
             dash_dir: Vec2::new(1.0, 0.0),
@@ -821,6 +824,7 @@ impl Game {
         self.player.dash_time = 0.0;
         self.player.walking = false;
         self.player.attack_pose = None;
+        self.player.strike_windup = false;
         self.player.invuln = 0.5;
         self.enemies.clear();
         self.pending.clear();
@@ -898,8 +902,14 @@ impl Game {
         }
 
         p.walking = false;
-        if let Some((_, _, ref mut progress)) = p.attack_pose {
-            *progress += DT / 0.27;
+        p.strike_windup = false;
+        if let Some((kind, _, ref mut progress)) = p.attack_pose {
+            *progress += DT
+                / if kind == EffectKind::Strike(2) {
+                    0.45
+                } else {
+                    0.27
+                };
             if *progress >= 1.0 {
                 p.attack_pose = None;
             }
@@ -965,6 +975,9 @@ impl Game {
             0.0
         };
 
+        // Anticipate held chains in the previous swing's recovery. A fresh
+        // strike still reaches its contact pose on the tick that deals damage.
+        p.strike_windup = input.strike && p.strike_cd > 0.0 && p.strike_cd <= 0.075;
         if input.strike && self.player.strike_cd <= 0.0 {
             self.do_strike();
         }
@@ -1008,12 +1021,12 @@ impl Game {
             p.combo = (step + 1) % 3;
             p.combo_timer = COMBO_WINDOW;
             p.strike_cd = cd;
-            p.attack_pose = Some((EffectKind::Strike, facing, 0.0));
+            p.attack_pose = Some((EffectKind::Strike(step), facing, 0.0));
             p.pos = clamp_arena(p.pos + facing * 0.16, PLAYER_RADIUS);
         }
         let pp = self.player.pos;
         self.effects.push(Effect {
-            kind: EffectKind::Strike,
+            kind: EffectKind::Strike(step),
             pos: pp,
             dir: facing,
             age: 0.0,
@@ -1057,6 +1070,7 @@ impl Game {
     fn do_cast(&mut self) {
         let p = &mut self.player;
         p.cast_cooldown = p.cast_cooldown_max;
+        p.strike_windup = false;
         p.attack_pose = Some((EffectKind::Burst, p.facing, 0.0));
         let dir = p.facing;
         self.shots.push(Shot {
@@ -1920,15 +1934,26 @@ mod tests {
             ..idle()
         };
         let mut dmgs = [0.0f32; 3];
-        for d in dmgs.iter_mut() {
+        for (step, d) in dmgs.iter_mut().enumerate() {
             let before = g.enemies[0].hp;
+            let mut prepared = false;
             // Wait until the strike lands.
             for _ in 0..60 {
                 g.step(aim);
+                if g.player.strike_windup {
+                    assert_eq!(g.player.combo, step as u8);
+                    prepared = true;
+                }
                 if g.enemies[0].hp < before {
                     break;
                 }
             }
+            assert_eq!(
+                g.player.attack_pose.unwrap().0,
+                EffectKind::Strike(step as u8)
+            );
+            assert_eq!(prepared, step != 0);
+            assert!(!g.player.strike_windup);
             *d = before - g.enemies[0].hp;
             g.enemies[0].pos = Vec2::new(g.player.pos.x + 1.2, 0.0);
             g.player.pos.y = 0.0;
