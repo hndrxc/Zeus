@@ -82,7 +82,29 @@ def P():
     )
 
 
-def setup(res_x, res_y, ortho, shift_y_px, transparent, engine="EEVEE", samples=48):
+def use_gpu(sc):
+    """Render Cycles on the first GPU backend with a device; keep the CPU otherwise."""
+    prefs = bpy.context.preferences.addons["cycles"].preferences
+    for backend in ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL"):
+        try:
+            prefs.compute_device_type = backend
+        except TypeError:
+            continue
+        devices = prefs.get_devices_for_type(backend)
+        gpus = [d for d in devices if d.type != "CPU"]
+        if gpus:
+            for d in devices:
+                d.use = d.type != "CPU"
+            sc.cycles.device = "GPU"
+            sc.cycles.denoising_use_gpu = True
+            print(f"Cycles: {backend} on {', '.join(d.name for d in gpus)}")
+            return
+    prefs.compute_device_type = "NONE"
+    sc.cycles.device = "CPU"
+    print("Cycles: no GPU backend found, rendering on the CPU")
+
+
+def setup(res_x, res_y, ortho, shift_y_px, transparent, engine="EEVEE", samples=48, gpu=True):
     sc = bpy.context.scene
     r = sc.render
     r.resolution_x, r.resolution_y, r.resolution_percentage = res_x, res_y, 100
@@ -115,6 +137,10 @@ def setup(res_x, res_y, ortho, shift_y_px, transparent, engine="EEVEE", samples=
         r.engine = "CYCLES"
         sc.cycles.samples = 64
         sc.cycles.use_denoising = True
+        if gpu:
+            use_gpu(sc)
+        else:
+            sc.cycles.device = "CPU"
     try:
         sc.view_settings.view_transform = "Standard"
         sc.view_settings.look = "None"
@@ -768,7 +794,9 @@ def render(path):
 def arena_scene(engine):
     fresh()
     M = P()
-    setup(900 * SS, 600 * SS, 900 / PX, 8 * SS, False, engine, samples=64)
+    # CPU only: the platform lip and the Sorting Floor rack have coplanar faces
+    # that OptiX resolves differently, so a GPU bake would change the committed art.
+    setup(900 * SS, 600 * SS, 900 / PX, 8 * SS, False, engine, samples=64, gpu=False)
     return M
 
 

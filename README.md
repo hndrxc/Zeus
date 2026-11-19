@@ -70,6 +70,8 @@ blender -b -P tools/bake_assets.py -- --only courier
 blender -b -P tools/bake_assets.py
 ```
 
+Character bakes render Cycles on the first GPU backend Blender finds (OptiX, CUDA, HIP, oneAPI or Metal), denoise there too, and fall back to the CPU without one. Chamber backgrounds always render on the CPU, because overlapping faces on the platform lip and the Sorting Floor rack render differently on the GPU and would change the committed art.
+
 The available jobs are `arena`, `courier`, `bailiff`, `censor` and `postmaster`. To rebuild only the chamber art, run `blender -b -P tools/bake_assets.py -- --only arena`. It writes `assets/arena.png` (Sorting Floor), `assets/arena_vault.png` (Dead Letter Vault) and `assets/arena_office.png` (Postmaster’s Office). All three are 2700 × 1800 and share one registration to the 900 × 600 design space. Each 768 × 768 character frame represents a 256 × 256 sprite in that space. Each character has four orthographic views. Rebuild the executable after a bake to pick up changed PNGs.
 
 For implementation conventions and checks to run when changing combat or art, see [AGENTS.md](AGENTS.md).
