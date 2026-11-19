@@ -28,7 +28,16 @@ const EMERGE_TIME: f32 = 0.8;
 const LULL: f32 = 0.9;
 /// Seconds a wave clerk's entry point is marked before it starts to emerge.
 pub const SPAWN_WARNING: f32 = 0.9;
-const HEAL_BETWEEN_CHAMBERS: f32 = 25.0;
+/// Hull repaired on entering the next chamber, capped at max hull.
+pub const HEAL_BETWEEN_CHAMBERS: f32 = 25.0;
+/// Authored strike combo: (damage, range, cos_arc, cooldown, knockback).
+const STRIKE_STEPS: [(f32, f32, f32, f32, f32); 3] = [
+    (14.0, 1.55, 0.5, 0.30, 0.3),
+    (15.0, 1.6, 0.5, 0.30, 0.35),
+    (28.0, 1.95, 0.0, 0.55, 1.0),
+];
+const DASH_LASH_DAMAGE: f32 = 14.0;
+const DASH_LASH_KNOCKBACK: f32 = 0.9;
 /// Seconds the finished drill stays on screen before the run begins.
 const DRILL_OUTRO: f32 = 1.0;
 
@@ -355,6 +364,59 @@ impl Default for Mods {
             lash: false,
         }
     }
+}
+
+/// A before/after pair for one previewed stat.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Change<T> {
+    pub before: T,
+    pub after: T,
+}
+
+/// Concrete effect of taking an endorsement from the current state.
+/// Strike arrays are ordered by combo step; seconds for cooldown and
+/// invulnerability; movement in world units per second. `Hull::on_entry`
+/// compares the hull on entering the next chamber when taking any other
+/// card with when taking this one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BoonPreview {
+    StrikeDamage(Change<[f32; 3]>),
+    StrikeReach(Change<[f32; 3]>),
+    Cast {
+        damage: Change<f32>,
+        pierce: Change<bool>,
+    },
+    CastCooldown(Change<f32>),
+    Dash {
+        cooldown: Change<f32>,
+        invulnerability: Change<f32>,
+    },
+    Hull {
+        max: Change<f32>,
+        on_entry: Change<f32>,
+    },
+    HullPerKill(Change<f32>),
+    MoveSpeed(Change<f32>),
+    DashLash {
+        enabled: Change<bool>,
+        damage: f32,
+    },
+}
+
+fn dash_cooldown_max(m: &Mods) -> f32 {
+    BASE_DASH_COOLDOWN * m.dash_cooldown
+}
+
+fn cast_cooldown_max(m: &Mods) -> f32 {
+    BASE_CAST_COOLDOWN * m.cast_cooldown
+}
+
+fn dash_invulnerability(m: &Mods) -> f32 {
+    DASH_IFRAMES + m.dash_iframes
+}
+
+fn chamber_heal(hp: f32, max_hp: f32) -> f32 {
+    (hp + HEAL_BETWEEN_CHAMBERS).min(max_hp)
 }
 
 #[derive(Clone, Debug)]
@@ -820,7 +882,7 @@ impl Game {
         self.seal_count += 1;
         self.chamber += 1;
         self.player.pos = Vec2::ZERO;
-        self.player.hp = (self.player.hp + HEAL_BETWEEN_CHAMBERS).min(self.player.max_hp);
+        self.player.hp = chamber_heal(self.player.hp, self.player.max_hp);
         self.player.dash_time = 0.0;
         self.player.walking = false;
         self.player.attack_pose = None;
@@ -836,8 +898,8 @@ impl Game {
         self.phase = Phase::Combat;
     }
 
-    fn apply_boon(&mut self, boon: Boon) {
-        let m = &mut self.mods;
+    /// Single arithmetic path for an endorsement: new mods plus (hp, max_hp).
+    fn upgraded(mut m: Mods, mut hp: f32, mut max_hp: f32, boon: Boon) -> (Mods, f32, f32) {
         match boon {
             Boon::FrankingHammer => m.strike *= 1.35,
             Boon::TidewaterReach => m.reach *= 1.3,
@@ -851,17 +913,105 @@ impl Game {
                 m.dash_iframes += 0.12;
             }
             Boon::PressureValve => {
-                self.player.max_hp += 30.0;
-                self.player.hp += 30.0;
+                max_hp += 30.0;
+                hp += 30.0;
             }
             Boon::ReturnReceipt => m.lifesteal += 6.0,
             Boon::ExpressPost => m.speed *= 1.15,
             Boon::UndertowLash => m.lash = true,
         }
-        self.player.dash_cooldown_max = BASE_DASH_COOLDOWN * self.mods.dash_cooldown;
-        self.player.cast_cooldown_max = BASE_CAST_COOLDOWN * self.mods.cast_cooldown;
+        (m, hp, max_hp)
+    }
+
+    fn apply_boon(&mut self, boon: Boon) {
+        let (mods, hp, max_hp) =
+            Self::upgraded(self.mods, self.player.hp, self.player.max_hp, boon);
+        self.mods = mods;
+        self.player.hp = hp;
+        self.player.max_hp = max_hp;
+        self.player.dash_cooldown_max = dash_cooldown_max(&self.mods);
+        self.player.cast_cooldown_max = cast_cooldown_max(&self.mods);
         self.player.dash_cooldown = self.player.dash_cooldown.min(self.player.dash_cooldown_max);
         self.player.cast_cooldown = self.player.cast_cooldown.min(self.player.cast_cooldown_max);
+    }
+
+    /// Read-only concrete current -> resulting effect of taking `boon` now.
+    pub fn boon_preview(&self, boon: Boon) -> BoonPreview {
+        let cur = self.mods;
+        let (next, hp, max_hp) = Self::upgraded(cur, self.player.hp, self.player.max_hp, boon);
+        let strikes = |m: &Mods| {
+            [
+                STRIKE_STEPS[0].0 * m.strike,
+                STRIKE_STEPS[1].0 * m.strike,
+                STRIKE_STEPS[2].0 * m.strike,
+            ]
+        };
+        let reaches = |m: &Mods| {
+            [
+                STRIKE_STEPS[0].1 * m.reach,
+                STRIKE_STEPS[1].1 * m.reach,
+                STRIKE_STEPS[2].1 * m.reach,
+            ]
+        };
+        match boon {
+            Boon::FrankingHammer => BoonPreview::StrikeDamage(Change {
+                before: strikes(&cur),
+                after: strikes(&next),
+            }),
+            Boon::TidewaterReach => BoonPreview::StrikeReach(Change {
+                before: reaches(&cur),
+                after: reaches(&next),
+            }),
+            Boon::RegisteredMail => BoonPreview::Cast {
+                damage: Change {
+                    before: CAST_DAMAGE * cur.cast,
+                    after: CAST_DAMAGE * next.cast,
+                },
+                pierce: Change {
+                    before: cur.pierce,
+                    after: next.pierce,
+                },
+            },
+            Boon::QuickDelivery => BoonPreview::CastCooldown(Change {
+                before: cast_cooldown_max(&cur),
+                after: cast_cooldown_max(&next),
+            }),
+            Boon::SlipstreamTag => BoonPreview::Dash {
+                cooldown: Change {
+                    before: dash_cooldown_max(&cur),
+                    after: dash_cooldown_max(&next),
+                },
+                invulnerability: Change {
+                    before: dash_invulnerability(&cur),
+                    after: dash_invulnerability(&next),
+                },
+            },
+            Boon::PressureValve => BoonPreview::Hull {
+                max: Change {
+                    before: self.player.max_hp,
+                    after: max_hp,
+                },
+                on_entry: Change {
+                    before: chamber_heal(self.player.hp, self.player.max_hp),
+                    after: chamber_heal(hp, max_hp),
+                },
+            },
+            Boon::ReturnReceipt => BoonPreview::HullPerKill(Change {
+                before: cur.lifesteal,
+                after: next.lifesteal,
+            }),
+            Boon::ExpressPost => BoonPreview::MoveSpeed(Change {
+                before: PLAYER_SPEED * cur.speed,
+                after: PLAYER_SPEED * next.speed,
+            }),
+            Boon::UndertowLash => BoonPreview::DashLash {
+                enabled: Change {
+                    before: cur.lash,
+                    after: next.lash,
+                },
+                damage: DASH_LASH_DAMAGE,
+            },
+        }
     }
 
     fn roll_choices(&mut self) {
@@ -937,7 +1087,7 @@ impl Game {
             p.dash_dir = d;
             p.dash_time = DASH_TIME;
             p.dash_cooldown = p.dash_cooldown_max;
-            p.invuln = p.invuln.max(DASH_IFRAMES + self.mods.dash_iframes);
+            p.invuln = p.invuln.max(dash_invulnerability(&self.mods));
             self.dash_stamp += 1;
             self.effects.push(Effect {
                 kind: EffectKind::Dash,
@@ -997,7 +1147,7 @@ impl Game {
             }
             if (e.pos - pp).len() < e.radius() + PLAYER_RADIUS + 0.2 {
                 self.enemies[i].dash_stamp = self.dash_stamp;
-                self.damage_enemy(i, 14.0, dir, 0.9, warded);
+                self.damage_enemy(i, DASH_LASH_DAMAGE, dir, DASH_LASH_KNOCKBACK, warded);
             }
         }
     }
@@ -1008,11 +1158,7 @@ impl Game {
         } else {
             0
         };
-        let (dmg, range, cos_arc, cd, kb) = match step {
-            0 => (14.0, 1.55, 0.5, 0.30, 0.3),
-            1 => (15.0, 1.6, 0.5, 0.30, 0.35),
-            _ => (28.0, 1.95, 0.0, 0.55, 1.0),
-        };
+        let (dmg, range, cos_arc, cd, kb) = STRIKE_STEPS[step.min(2) as usize];
         let dmg = dmg * self.mods.strike;
         let range = range * self.mods.reach;
         let facing = self.player.facing;
@@ -2868,5 +3014,253 @@ mod tests {
         assert_eq!(g.phase, Phase::Choice);
         assert_eq!(g.chamber, 2);
         assert_eq!(g.kills, 4);
+    }
+
+    // Boon-preview tests: each case measures the live game before, and an
+    // identical game after, the choice.
+
+    fn assert_near(a: f32, b: f32, what: &str) {
+        assert!(near(a, b), "{what}: {a} vs {b}");
+    }
+
+    fn assert_near3(a: [f32; 3], b: [f32; 3], what: &str) {
+        for i in 0..3 {
+            assert_near(a[i], b[i], &format!("{what}[{i}]"));
+        }
+    }
+
+    /// A game in `Phase::Choice` that already took `prior` through real choices,
+    /// then wounded to `hp` (never above its max hull).
+    fn staged(prior: &[Boon], hp: f32) -> Game {
+        let mut g = Game::quiet_arena(11);
+        for &b in prior {
+            g.phase = Phase::Choice;
+            g.choices = [b; 3];
+            g.choose(0);
+        }
+        g.phase = Phase::Choice;
+        g.player.hp = hp.min(g.player.max_hp);
+        g
+    }
+
+    /// `staged`, then the player picks `b` as the second card on offer.
+    fn staged_and_chose(prior: &[Boon], hp: f32, b: Boon) -> Game {
+        let mut g = staged(prior, hp);
+        g.choices[1] = b;
+        g.choose(1);
+        assert_eq!(g.phase, Phase::Combat, "{b:?} after {prior:?}");
+        g
+    }
+
+    fn dummy(g: &mut Game, pos: Vec2) {
+        let mut e = g.make_enemy(EnemyKind::Bailiff, pos);
+        e.emerging = false;
+        e.begin(S_MOVE, 0.0);
+        e.cd = f32::INFINITY;
+        e.hp = 1000.0;
+        e.max_hp = 1000.0;
+        g.enemies.clear();
+        g.enemies.push(e);
+    }
+
+    /// Damage and reach of the three combo steps, from real strikes.
+    fn strikes(g: &mut Game) -> ([f32; 3], [f32; 3]) {
+        let (mut dmg, mut reach) = ([0.0; 3], [0.0; 3]);
+        g.player.combo_timer = 0.0;
+        for step in 0..3 {
+            g.player.pos = Vec2::ZERO;
+            g.player.facing = Vec2::new(1.0, 0.0);
+            g.effects.clear();
+            dummy(g, Vec2::new(1.0, 0.0));
+            g.do_strike();
+            dmg[step] = 1000.0 - g.enemies[0].hp;
+            reach[step] = g
+                .effects
+                .iter()
+                .rev()
+                .find(|e| matches!(e.kind, EffectKind::Strike(_)))
+                .expect("strike effect")
+                .radius;
+        }
+        (dmg, reach)
+    }
+
+    /// Damage, piercing and installed cooldown of a real cast.
+    fn cast(g: &mut Game) -> (f32, bool, f32) {
+        g.player.cast_cooldown = 0.0;
+        g.shots.clear();
+        g.do_cast();
+        let s = g.shots.last().expect("cast shot");
+        (s.damage, s.pierce, g.player.cast_cooldown)
+    }
+
+    /// Installed dash cooldown and invulnerability of a real dash.
+    fn dash(g: &mut Game) -> (f32, f32) {
+        g.enemies.clear();
+        g.player.dash_cooldown = 0.0;
+        g.player.dash_time = 0.0;
+        g.player.invuln = 0.0;
+        g.prev_dash = false;
+        g.update_player(&Input {
+            dash: true,
+            ..Input::default()
+        });
+        assert!(g.player.dashing());
+        (g.player.dash_cooldown, g.player.invuln)
+    }
+
+    /// Units walked per second from the origin.
+    fn walk_speed(g: &mut Game) -> f32 {
+        g.player.pos = Vec2::ZERO;
+        g.player.dash_time = 0.0;
+        g.update_player(&Input {
+            movement: Vec2::new(1.0, 0.0),
+            ..Input::default()
+        });
+        g.player.pos.x / DT
+    }
+
+    /// Hull restored by one real cancellation.
+    fn kill_heal(g: &mut Game) -> f32 {
+        dummy(g, Vec2::new(2.0, 0.0));
+        g.enemies[0].hp = 0.0;
+        g.player.hp = 10.0;
+        g.player.max_hp = g.player.max_hp.max(100.0);
+        g.resolve_deaths();
+        g.player.hp - 10.0
+    }
+
+    /// Whether a dash through an adjacent enemy rips it, and for how much.
+    fn lash(g: &mut Game) -> (bool, f32) {
+        g.player.pos = Vec2::ZERO;
+        dummy(g, Vec2::new(0.5, 0.0));
+        g.player.dash_cooldown = 0.0;
+        g.player.dash_time = 0.0;
+        g.prev_dash = false;
+        g.update_player(&Input {
+            dash: true,
+            ..Input::default()
+        });
+        let dealt = 1000.0 - g.enemies[0].hp;
+        (dealt > 0.0, dealt)
+    }
+
+    /// Preview `b` on one game, choose it on an identical one, and compare.
+    fn check(prior: &[Boon], b: Boon, hp: f32) {
+        let mut a = staged(prior, hp);
+        let preview = a.boon_preview(b);
+        let mut after = staged_and_chose(prior, hp, b);
+        let what = format!("{b:?} after {prior:?}");
+
+        match (b, preview) {
+            (Boon::FrankingHammer, BoonPreview::StrikeDamage(c)) => {
+                assert_near3(strikes(&mut a).0, c.before, &what);
+                assert_near3(strikes(&mut after).0, c.after, &what);
+            }
+            (Boon::TidewaterReach, BoonPreview::StrikeReach(c)) => {
+                assert_near3(strikes(&mut a).1, c.before, &what);
+                assert_near3(strikes(&mut after).1, c.after, &what);
+            }
+            (Boon::RegisteredMail, BoonPreview::Cast { damage, pierce }) => {
+                let (before, after) = (cast(&mut a), cast(&mut after));
+                assert_near(before.0, damage.before, &what);
+                assert_near(after.0, damage.after, &what);
+                assert_eq!((before.1, after.1), (pierce.before, pierce.after), "{what}");
+            }
+            (Boon::QuickDelivery, BoonPreview::CastCooldown(c)) => {
+                assert_near(cast(&mut a).2, c.before, &what);
+                assert_near(cast(&mut after).2, c.after, &what);
+            }
+            (
+                Boon::SlipstreamTag,
+                BoonPreview::Dash {
+                    cooldown,
+                    invulnerability,
+                },
+            ) => {
+                let (before, after) = (dash(&mut a), dash(&mut after));
+                assert_near(before.0, cooldown.before, &what);
+                assert_near(after.0, cooldown.after, &what);
+                assert_near(before.1, invulnerability.before, &what);
+                assert_near(after.1, invulnerability.after, &what);
+            }
+            (Boon::PressureValve, BoonPreview::Hull { max, on_entry }) => {
+                // "Before" is what picking a different, non-hull card yields.
+                let other = Boon::ALL
+                    .into_iter()
+                    .find(|&o| o != b && !prior.contains(&o))
+                    .expect("an unowned alternative");
+                let skipped = staged_and_chose(prior, hp, other);
+                assert_near(skipped.player.max_hp, max.before, &what);
+                assert_near(after.player.max_hp, max.after, &what);
+                assert_near(skipped.player.hp, on_entry.before, &what);
+                assert_near(after.player.hp, on_entry.after, &what);
+            }
+            (Boon::ReturnReceipt, BoonPreview::HullPerKill(c)) => {
+                assert_near(kill_heal(&mut a), c.before, &what);
+                assert_near(kill_heal(&mut after), c.after, &what);
+            }
+            (Boon::ExpressPost, BoonPreview::MoveSpeed(c)) => {
+                assert_near(walk_speed(&mut a), c.before, &what);
+                assert_near(walk_speed(&mut after), c.after, &what);
+            }
+            (Boon::UndertowLash, BoonPreview::DashLash { enabled, damage }) => {
+                let (before, after) = (lash(&mut a), lash(&mut after));
+                assert_eq!(
+                    (before.0, after.0),
+                    (enabled.before, enabled.after),
+                    "{what}"
+                );
+                assert!(after.0);
+                assert_near(after.1, damage, &what);
+            }
+            (b, p) => panic!("{b:?} previewed as {p:?}"),
+        }
+    }
+
+    #[test]
+    fn every_preview_matches_what_choose_does_in_reachable_states() {
+        for b in Boon::ALL {
+            // Chamber I offers (nothing owned); chamber II (one other owned).
+            check(&[], b, 40.0);
+            for o in Boon::ALL.into_iter().filter(|&o| o != b) {
+                check(&[o], b, 40.0);
+            }
+        }
+    }
+
+    #[test]
+    fn hull_entry_is_capped_by_the_new_maximum() {
+        // (hp, entry hull with another card, entry hull with the valve)
+        for (hp, plain, valve) in [
+            (100.0, 100.0, 130.0),
+            (90.0, 100.0, 130.0),
+            (60.0, 85.0, 115.0),
+            (20.0, 45.0, 75.0),
+        ] {
+            let g = staged(&[], hp);
+            let BoonPreview::Hull { max, on_entry } = g.boon_preview(Boon::PressureValve) else {
+                panic!()
+            };
+            assert_near(max.before, 100.0, "max before");
+            assert_near(max.after, 130.0, "max after");
+            assert_near(on_entry.before, plain, "entry before");
+            assert_near(on_entry.after, valve, "entry after");
+            let took = staged_and_chose(&[], hp, Boon::PressureValve);
+            assert_near(took.player.hp, valve, "real hull with the valve");
+            let skipped = staged_and_chose(&[], hp, Boon::FrankingHammer);
+            assert_near(skipped.player.hp, plain, "real hull without the valve");
+        }
+    }
+
+    #[test]
+    fn offers_never_include_owned_endorsements() {
+        for b in Boon::ALL {
+            let mut g = staged(&[b], 100.0);
+            for _ in 0..20 {
+                g.roll_choices();
+                assert!(!g.choices.contains(&b), "{b:?} offered while owned");
+            }
+        }
     }
 }

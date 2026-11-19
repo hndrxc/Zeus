@@ -17,7 +17,10 @@ use gpui::{
     Window, WindowBounds, WindowOptions,
 };
 
-use engine::{Boon, EnemyKind, Game, Input, Lesson, Phase, Vec2, CHAMBERS};
+use engine::{
+    Boon, BoonPreview, Change, EnemyKind, Game, Input, Lesson, Phase, Vec2, CHAMBERS,
+    HEAL_BETWEEN_CHAMBERS,
+};
 
 // ---------------------------------------------------------------- palette ---
 const INK: u32 = 0x060f12; // abyss slate matching outer arena water
@@ -401,6 +404,101 @@ impl Shell {
 }
 
 // --------------------------------------------------------------- widgets ----
+/// One preview line: label, current value, then the resulting value.
+fn preview_row(label: &str, before: String, after: String) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .child(mono(label.to_string(), 9.0, PEARL_DIM).font_weight(FontWeight::BOLD))
+        .child(mono(before, 10.0, PEARL_DIM))
+        .child(mono(format!("\u{2192} {after}"), 10.0, BRASS).font_weight(FontWeight::BOLD))
+}
+
+/// At most two decimals, trailing zeros and dot trimmed (14 -> "14", 18.9 -> "18.9").
+fn fmt_num(v: f32) -> String {
+    let s = format!("{v:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Signed whole-percent change, e.g. " (+15%)".
+fn pct(before: f32, after: f32) -> String {
+    format!(" ({:+.0}%)", (after / before - 1.0) * 100.0)
+}
+
+fn num(c: &Change<f32>, unit: &str) -> (String, String) {
+    (
+        format!("{}{unit}", fmt_num(c.before)),
+        format!("{}{unit}", fmt_num(c.after)),
+    )
+}
+
+fn combo(c: &Change<[f32; 3]>) -> (String, String) {
+    let f = |a: &[f32; 3]| format!("{} / {} / {}", fmt_num(a[0]), fmt_num(a[1]), fmt_num(a[2]));
+    (f(&c.before), f(&c.after))
+}
+
+fn onoff(c: &Change<bool>) -> (String, String) {
+    let f = |b: bool| if b { "ON" } else { "OFF" }.to_string();
+    (f(c.before), f(c.after))
+}
+
+/// Concrete current -> resulting effects of an offered endorsement.
+fn preview_block(p: BoonPreview) -> Div {
+    let rows: Vec<(&str, (String, String))> = match p {
+        BoonPreview::StrikeDamage(c) => vec![("STRIKE DAMAGE 1/2/3", combo(&c))],
+        BoonPreview::StrikeReach(c) => {
+            let (b, a) = combo(&c);
+            let a = format!("{a}{}", pct(c.before[0], c.after[0]));
+            vec![("STRIKE REACH 1/2/3", (b, a))]
+        }
+        BoonPreview::Cast { damage, pierce } => vec![
+            ("CAST DAMAGE", num(&damage, "")),
+            ("CAST PIERCES", onoff(&pierce)),
+        ],
+        BoonPreview::CastCooldown(c) => vec![("CAST COOLDOWN", num(&c, "s"))],
+        BoonPreview::Dash {
+            cooldown,
+            invulnerability,
+        } => vec![
+            ("DASH COOLDOWN", num(&cooldown, "s")),
+            ("DASH INVULNERABILITY", num(&invulnerability, "s")),
+        ],
+        BoonPreview::Hull { max, on_entry } => vec![
+            (
+                "MAX HULL",
+                (format!("{:.0}", max.before), format!("{:.0}", max.after)),
+            ),
+            (
+                "HULL ON ENTRY",
+                (
+                    format!("{:.0}", on_entry.before.ceil()),
+                    format!("{:.0}", on_entry.after.ceil()),
+                ),
+            ),
+        ],
+        BoonPreview::HullPerKill(c) => vec![("HULL PER KILL", num(&c, ""))],
+        BoonPreview::MoveSpeed(c) => {
+            let (b, a) = num(&c, "");
+            vec![("MOVE SPEED", (b, format!("{a}{}", pct(c.before, c.after))))]
+        }
+        BoonPreview::DashLash { enabled, damage } => {
+            let f = |on: bool| {
+                if on {
+                    format!("{} DAMAGE + SHOVE", fmt_num(damage))
+                } else {
+                    "OFF".to_string()
+                }
+            };
+            vec![("DASH LASH", (f(enabled.before), f(enabled.after)))]
+        }
+    };
+    div().flex().flex_col().gap(px(7.0)).children(
+        rows.into_iter()
+            .map(|(label, (b, a))| preview_row(label, b, a)),
+    )
+}
+
 fn mono(s: impl Into<SharedString>, size: f32, color: u32) -> Div {
     div()
         .font_family(MONO)
@@ -1261,13 +1359,8 @@ impl Shell {
                             )
                             .child(rule(TEAL_HI))
                             .child(serif(b.title(), 19.0, PEARL).font_weight(FontWeight::BOLD))
-                            .child(
-                                div()
-                                    .font_family(MONO)
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(PEARL_DIM))
-                                    .child(b.description()),
-                            ),
+                            .child(rule(TEAL_HI))
+                            .child(preview_block(self.game.boon_preview(b))),
                     );
                 }
                 Some(
@@ -1275,8 +1368,9 @@ impl Shell {
                         .child(
                             mono(
                                 format!(
-                                    "CHAMBER {} SORTED \u{00b7} +25 HULL RESTORED",
-                                    roman(self.game.chamber.min(9))
+                                    "CHAMBER {} SORTED \u{00b7} +{:.0} HULL ON ENTRY",
+                                    roman(self.game.chamber.min(9)),
+                                    HEAL_BETWEEN_CHAMBERS
                                 ),
                                 10.0,
                                 BRASS,
