@@ -86,6 +86,21 @@ static COURIER_FRAMES: LazyLock<[[Arc<Image>; 19]; 4]> = LazyLock::new(|| {
         courier_direction!("3"),
     ]
 });
+
+macro_rules! ward_clerk_direction {
+    ($direction:literal) => {
+        sprite_frames!("ward_clerk", $direction; "00","01","02","03","04","05","06","07","08")
+    };
+}
+
+static WARD_CLERK_FRAMES: LazyLock<[[Arc<Image>; 9]; 4]> = LazyLock::new(|| {
+    [
+        ward_clerk_direction!("0"),
+        ward_clerk_direction!("1"),
+        ward_clerk_direction!("2"),
+        ward_clerk_direction!("3"),
+    ]
+});
 macro_rules! enemy_direction {
     ($actor:literal, $direction:literal $(, $extra:literal)*) => {
         sprite_frames!($actor,$direction; "00","01","02","03","04","05","06","07","08","09","10","11","12","13" $(,$extra)*)
@@ -258,10 +273,8 @@ impl Kind {
         let direction = view_direction(facing);
         match self {
             Kind::Bailiff => BAILIFF_FRAMES[direction][frame].clone(),
-            // Prototype: the ward clerk borrows the Censor body until its own
-            // ward_clerk art is baked (neutral 0 + strides 1..=8; no attack frames).
             Kind::Censor => CENSOR_FRAMES[direction][frame].clone(),
-            Kind::WardClerk => CENSOR_FRAMES[direction][frame].clone(),
+            Kind::WardClerk => WARD_CLERK_FRAMES[direction][frame].clone(),
             Kind::Postmaster => POSTMASTER_FRAMES[direction][frame].clone(),
         }
     }

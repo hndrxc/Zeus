@@ -193,6 +193,47 @@ ATTACKS = {
 
 
 def animate(name,rig,scene):
+    if name == "ward_clerk":
+        root, body, arms, legs, base, knees, ankles = rig
+        origin = body.location.copy()
+        samples = []
+        def ward_pose(frame, swing, lift):
+            body.location = origin + Vector((0, 0, lift))
+            body.rotation_euler = (0, math.radians(2.0 + 1.5 * lift * 20.0),
+                                   math.radians(-6.0 * swing))
+            body.keyframe_insert(data_path="location", frame=frame)
+            body.keyframe_insert(data_path="rotation_euler", frame=frame)
+            # Seal-side arm holds the reliquary nearly still; the other arm
+            # counterbalances the stride. Hip pitch is about Blender Y because
+            # the Ward Clerk's legs are built downward from the pelvis.
+            arm_pitch = (-6.0 * swing, 16.0 * swing)
+            for j, arm in enumerate(arms):
+                arm.rotation_euler = (math.radians(4.0 if j == 0 else -4.0),
+                                      math.radians(arm_pitch[j]), 0)
+                arm.keyframe_insert(data_path="rotation_euler", frame=frame)
+            for j, (hip, knee, ankle) in enumerate(zip(legs, knees, ankles)):
+                leg_swing = swing if j == 0 else -swing
+                knee_angle = 4.0 + 24.0 * max(0.0, -leg_swing)
+                hip.rotation_euler = (0, math.radians(-21.0 * leg_swing), 0)
+                knee.rotation_euler = (0, math.radians(knee_angle), 0)
+                ankle.rotation_euler = (0, math.radians(-0.7 * knee_angle), 0)
+                hip.keyframe_insert(data_path="rotation_euler", frame=frame)
+                knee.keyframe_insert(data_path="rotation_euler", frame=frame)
+                ankle.keyframe_insert(data_path="rotation_euler", frame=frame)
+        ward_pose(1, 0.0, 0.0)
+        samples.append(1)
+        scene.timeline_markers.new("Ready", frame=1)
+        scene.timeline_markers.new("Ward stride", frame=5)
+        for k in range(8):
+            phase = math.tau * k / 8.0
+            swing = math.cos(phase)
+            lift = .008 * math.sin(phase) ** 2 - .012 if abs(swing) > .95 else .006 * math.sin(phase) ** 2
+            frame = 5 + 2 * k
+            ward_pose(frame, swing, lift)
+            samples.append(frame)
+        scene.frame_end = 20
+        scene.render.fps = 30
+        return samples
     root,body,arms,legs,base=rig
     origin=body.location.copy()
     samples=[]
@@ -246,7 +287,7 @@ def bake(name,builder,engine):
     size=256*SS*ZOOM
     scene=setup(size,size,256/PX,size*48/256,True,engine,samples=16)
     scene.view_settings.view_transform="AgX"
-    rig=build_rig(name,builder,m)
+    rig=builder(m) if name=="ward_clerk" else build_rig(name,builder,m)
     if name=="postmaster": rig[0].scale=(.8,.8,.8)
     samples=animate(name,rig,scene)
     lights_char()
