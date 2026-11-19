@@ -17,7 +17,7 @@ use gpui::{
     Window, WindowBounds, WindowOptions,
 };
 
-use engine::{Boon, EnemyKind, Game, Input, Lesson, Phase, Vec2, CHAMBERS};
+use engine::{Boon, BoonPreview, Change, EnemyKind, Game, Input, Lesson, Phase, Vec2, CHAMBERS};
 
 // ---------------------------------------------------------------- palette ---
 const INK: u32 = 0x060f12; // abyss slate matching outer arena water
@@ -401,6 +401,83 @@ impl Shell {
 }
 
 // --------------------------------------------------------------- widgets ----
+/// One preview line: label, then current and resulting values.
+fn preview_row(label: &str, before: String, after: String) -> Div {
+    let mut row = div()
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .child(mono(label.to_string(), 9.0, PEARL_DIM).font_weight(FontWeight::BOLD));
+    if before == after {
+        row = row
+            .child(mono(before, 10.0, PEARL))
+            .child(mono("UNCHANGED", 10.0, PEARL_DIM));
+    } else {
+        row = row
+            .child(mono(before, 10.0, PEARL_DIM))
+            .child(mono(format!("\u{2192} {after}"), 10.0, BRASS).font_weight(FontWeight::BOLD));
+    }
+    row
+}
+
+fn num(c: &Change<f32>, prec: usize, unit: &str) -> (String, String) {
+    (
+        format!("{:.*}{unit}", prec, c.before),
+        format!("{:.*}{unit}", prec, c.after),
+    )
+}
+
+fn combo(c: &Change<[f32; 3]>, prec: usize) -> (String, String) {
+    let f = |a: &[f32; 3]| format!("{:.*} / {:.*} / {:.*}", prec, a[0], prec, a[1], prec, a[2]);
+    (f(&c.before), f(&c.after))
+}
+
+fn onoff(c: &Change<bool>) -> (String, String) {
+    let f = |b: bool| if b { "ON" } else { "OFF" }.to_string();
+    (f(c.before), f(c.after))
+}
+
+/// Concrete current -> resulting effects of an offered endorsement.
+fn preview_block(p: BoonPreview) -> Div {
+    let mut col = div().flex().flex_col().gap(px(7.0));
+    let mut add = |label: &str, (b, a): (String, String)| {
+        col = std::mem::replace(&mut col, div()).child(preview_row(label, b, a));
+    };
+    match p {
+        BoonPreview::StrikeDamage(c) => add("STRIKE DAMAGE 1/2/3", combo(&c, 2)),
+        BoonPreview::StrikeReach(c) => add("STRIKE REACH 1/2/3", combo(&c, 2)),
+        BoonPreview::Cast { damage, pierce } => {
+            add("CAST DAMAGE", num(&damage, 2, ""));
+            add("CAST PIERCES", onoff(&pierce));
+        }
+        BoonPreview::CastCooldown(c) => add("CAST COOLDOWN", num(&c, 2, "s")),
+        BoonPreview::Dash {
+            cooldown,
+            invulnerability,
+        } => {
+            add("DASH COOLDOWN", num(&cooldown, 2, "s"));
+            add("DASH INVULNERABILITY", num(&invulnerability, 2, "s"));
+        }
+        BoonPreview::Hull { max, on_entry } => {
+            add("MAX HULL", num(&max, 0, ""));
+            add("HULL ON ENTRY", num(&on_entry, 0, ""));
+        }
+        BoonPreview::HullPerKill(c) => add("HULL PER KILL", num(&c, 2, "")),
+        BoonPreview::MoveSpeed(c) => add("MOVE SPEED", num(&c, 2, "")),
+        BoonPreview::DashLash { enabled, damage } => {
+            let f = |on: bool| {
+                if on {
+                    format!("{damage:.2} DAMAGE + SHOVE")
+                } else {
+                    "OFF".to_string()
+                }
+            };
+            add("DASH LASH", (f(enabled.before), f(enabled.after)));
+        }
+    }
+    col
+}
+
 fn mono(s: impl Into<SharedString>, size: f32, color: u32) -> Div {
     div()
         .font_family(MONO)
@@ -1261,13 +1338,8 @@ impl Shell {
                             )
                             .child(rule(TEAL_HI))
                             .child(serif(b.title(), 19.0, PEARL).font_weight(FontWeight::BOLD))
-                            .child(
-                                div()
-                                    .font_family(MONO)
-                                    .text_size(px(11.0))
-                                    .text_color(rgb(PEARL_DIM))
-                                    .child(b.description()),
-                            ),
+                            .child(rule(TEAL_HI))
+                            .child(preview_block(self.game.boon_preview(b))),
                     );
                 }
                 Some(
@@ -1275,7 +1347,7 @@ impl Shell {
                         .child(
                             mono(
                                 format!(
-                                    "CHAMBER {} SORTED \u{00b7} +25 HULL RESTORED",
+                                    "CHAMBER {} SORTED \u{00b7} HULL REPAIR ON ENTRY",
                                     roman(self.game.chamber.min(9))
                                 ),
                                 10.0,

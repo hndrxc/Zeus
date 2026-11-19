@@ -29,6 +29,14 @@ const LULL: f32 = 0.9;
 /// Seconds a wave clerk's entry point is marked before it starts to emerge.
 pub const SPAWN_WARNING: f32 = 0.9;
 const HEAL_BETWEEN_CHAMBERS: f32 = 25.0;
+/// Authored strike combo: (damage, range, cos_arc, cooldown, knockback).
+const STRIKE_STEPS: [(f32, f32, f32, f32, f32); 3] = [
+    (14.0, 1.55, 0.5, 0.30, 0.3),
+    (15.0, 1.6, 0.5, 0.30, 0.35),
+    (28.0, 1.95, 0.0, 0.55, 1.0),
+];
+const DASH_LASH_DAMAGE: f32 = 14.0;
+const DASH_LASH_KNOCKBACK: f32 = 0.9;
 /// Seconds the finished drill stays on screen before the run begins.
 const DRILL_OUTRO: f32 = 1.0;
 
@@ -355,6 +363,57 @@ impl Default for Mods {
             lash: false,
         }
     }
+}
+
+/// A before/after pair for one previewed stat.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Change<T> {
+    pub before: T,
+    pub after: T,
+}
+
+/// Concrete effect of taking an endorsement from the current state.
+/// Strike arrays are ordered by combo step; seconds for cooldown and
+/// invulnerability; movement in world units per second.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BoonPreview {
+    StrikeDamage(Change<[f32; 3]>),
+    StrikeReach(Change<[f32; 3]>),
+    Cast {
+        damage: Change<f32>,
+        pierce: Change<bool>,
+    },
+    CastCooldown(Change<f32>),
+    Dash {
+        cooldown: Change<f32>,
+        invulnerability: Change<f32>,
+    },
+    Hull {
+        max: Change<f32>,
+        on_entry: Change<f32>,
+    },
+    HullPerKill(Change<f32>),
+    MoveSpeed(Change<f32>),
+    DashLash {
+        enabled: Change<bool>,
+        damage: f32,
+    },
+}
+
+fn dash_cooldown_max(m: &Mods) -> f32 {
+    BASE_DASH_COOLDOWN * m.dash_cooldown
+}
+
+fn cast_cooldown_max(m: &Mods) -> f32 {
+    BASE_CAST_COOLDOWN * m.cast_cooldown
+}
+
+fn dash_invulnerability(m: &Mods) -> f32 {
+    DASH_IFRAMES + m.dash_iframes
+}
+
+fn chamber_heal(hp: f32, max_hp: f32) -> f32 {
+    (hp + HEAL_BETWEEN_CHAMBERS).min(max_hp)
 }
 
 #[derive(Clone, Debug)]
@@ -820,7 +879,7 @@ impl Game {
         self.seal_count += 1;
         self.chamber += 1;
         self.player.pos = Vec2::ZERO;
-        self.player.hp = (self.player.hp + HEAL_BETWEEN_CHAMBERS).min(self.player.max_hp);
+        self.player.hp = chamber_heal(self.player.hp, self.player.max_hp);
         self.player.dash_time = 0.0;
         self.player.walking = false;
         self.player.attack_pose = None;
@@ -836,8 +895,8 @@ impl Game {
         self.phase = Phase::Combat;
     }
 
-    fn apply_boon(&mut self, boon: Boon) {
-        let m = &mut self.mods;
+    /// Single arithmetic path for an endorsement: new mods plus (hp, max_hp).
+    fn upgraded(mut m: Mods, mut hp: f32, mut max_hp: f32, boon: Boon) -> (Mods, f32, f32) {
         match boon {
             Boon::FrankingHammer => m.strike *= 1.35,
             Boon::TidewaterReach => m.reach *= 1.3,
@@ -851,17 +910,105 @@ impl Game {
                 m.dash_iframes += 0.12;
             }
             Boon::PressureValve => {
-                self.player.max_hp += 30.0;
-                self.player.hp += 30.0;
+                max_hp += 30.0;
+                hp += 30.0;
             }
             Boon::ReturnReceipt => m.lifesteal += 6.0,
             Boon::ExpressPost => m.speed *= 1.15,
             Boon::UndertowLash => m.lash = true,
         }
-        self.player.dash_cooldown_max = BASE_DASH_COOLDOWN * self.mods.dash_cooldown;
-        self.player.cast_cooldown_max = BASE_CAST_COOLDOWN * self.mods.cast_cooldown;
+        (m, hp, max_hp)
+    }
+
+    fn apply_boon(&mut self, boon: Boon) {
+        let (mods, hp, max_hp) =
+            Self::upgraded(self.mods, self.player.hp, self.player.max_hp, boon);
+        self.mods = mods;
+        self.player.hp = hp;
+        self.player.max_hp = max_hp;
+        self.player.dash_cooldown_max = dash_cooldown_max(&self.mods);
+        self.player.cast_cooldown_max = cast_cooldown_max(&self.mods);
         self.player.dash_cooldown = self.player.dash_cooldown.min(self.player.dash_cooldown_max);
         self.player.cast_cooldown = self.player.cast_cooldown.min(self.player.cast_cooldown_max);
+    }
+
+    /// Read-only concrete current -> resulting effect of taking `boon` now.
+    pub fn boon_preview(&self, boon: Boon) -> BoonPreview {
+        let cur = self.mods;
+        let (next, hp, max_hp) = Self::upgraded(cur, self.player.hp, self.player.max_hp, boon);
+        let strikes = |m: &Mods| {
+            [
+                STRIKE_STEPS[0].0 * m.strike,
+                STRIKE_STEPS[1].0 * m.strike,
+                STRIKE_STEPS[2].0 * m.strike,
+            ]
+        };
+        let reaches = |m: &Mods| {
+            [
+                STRIKE_STEPS[0].1 * m.reach,
+                STRIKE_STEPS[1].1 * m.reach,
+                STRIKE_STEPS[2].1 * m.reach,
+            ]
+        };
+        match boon {
+            Boon::FrankingHammer => BoonPreview::StrikeDamage(Change {
+                before: strikes(&cur),
+                after: strikes(&next),
+            }),
+            Boon::TidewaterReach => BoonPreview::StrikeReach(Change {
+                before: reaches(&cur),
+                after: reaches(&next),
+            }),
+            Boon::RegisteredMail => BoonPreview::Cast {
+                damage: Change {
+                    before: CAST_DAMAGE * cur.cast,
+                    after: CAST_DAMAGE * next.cast,
+                },
+                pierce: Change {
+                    before: cur.pierce,
+                    after: next.pierce,
+                },
+            },
+            Boon::QuickDelivery => BoonPreview::CastCooldown(Change {
+                before: cast_cooldown_max(&cur),
+                after: cast_cooldown_max(&next),
+            }),
+            Boon::SlipstreamTag => BoonPreview::Dash {
+                cooldown: Change {
+                    before: dash_cooldown_max(&cur),
+                    after: dash_cooldown_max(&next),
+                },
+                invulnerability: Change {
+                    before: dash_invulnerability(&cur),
+                    after: dash_invulnerability(&next),
+                },
+            },
+            Boon::PressureValve => BoonPreview::Hull {
+                max: Change {
+                    before: self.player.max_hp,
+                    after: max_hp,
+                },
+                on_entry: Change {
+                    before: self.player.hp,
+                    after: chamber_heal(hp, max_hp),
+                },
+            },
+            Boon::ReturnReceipt => BoonPreview::HullPerKill(Change {
+                before: cur.lifesteal,
+                after: next.lifesteal,
+            }),
+            Boon::ExpressPost => BoonPreview::MoveSpeed(Change {
+                before: PLAYER_SPEED * cur.speed,
+                after: PLAYER_SPEED * next.speed,
+            }),
+            Boon::UndertowLash => BoonPreview::DashLash {
+                enabled: Change {
+                    before: cur.lash,
+                    after: next.lash,
+                },
+                damage: DASH_LASH_DAMAGE,
+            },
+        }
     }
 
     fn roll_choices(&mut self) {
@@ -937,7 +1084,7 @@ impl Game {
             p.dash_dir = d;
             p.dash_time = DASH_TIME;
             p.dash_cooldown = p.dash_cooldown_max;
-            p.invuln = p.invuln.max(DASH_IFRAMES + self.mods.dash_iframes);
+            p.invuln = p.invuln.max(dash_invulnerability(&self.mods));
             self.dash_stamp += 1;
             self.effects.push(Effect {
                 kind: EffectKind::Dash,
@@ -997,7 +1144,7 @@ impl Game {
             }
             if (e.pos - pp).len() < e.radius() + PLAYER_RADIUS + 0.2 {
                 self.enemies[i].dash_stamp = self.dash_stamp;
-                self.damage_enemy(i, 14.0, dir, 0.9, warded);
+                self.damage_enemy(i, DASH_LASH_DAMAGE, dir, DASH_LASH_KNOCKBACK, warded);
             }
         }
     }
@@ -1008,11 +1155,7 @@ impl Game {
         } else {
             0
         };
-        let (dmg, range, cos_arc, cd, kb) = match step {
-            0 => (14.0, 1.55, 0.5, 0.30, 0.3),
-            1 => (15.0, 1.6, 0.5, 0.30, 0.35),
-            _ => (28.0, 1.95, 0.0, 0.55, 1.0),
-        };
+        let (dmg, range, cos_arc, cd, kb) = STRIKE_STEPS[step.min(2) as usize];
         let dmg = dmg * self.mods.strike;
         let range = range * self.mods.reach;
         let facing = self.player.facing;
@@ -1783,6 +1926,9 @@ impl Game {
         e.cd = f32::INFINITY;
     }
 }
+
+#[cfg(test)]
+mod boon_preview_tests;
 
 #[cfg(test)]
 mod tests {
