@@ -976,6 +976,7 @@ impl Game {
     fn dash_lash(&mut self) {
         let pp = self.player.pos;
         let dir = self.player.dash_dir;
+        let warded = self.warded_mask();
         for i in 0..self.enemies.len() {
             let e = &self.enemies[i];
             if e.dash_stamp == self.dash_stamp || !e.hittable() {
@@ -983,7 +984,7 @@ impl Game {
             }
             if (e.pos - pp).len() < e.radius() + PLAYER_RADIUS + 0.2 {
                 self.enemies[i].dash_stamp = self.dash_stamp;
-                self.damage_enemy(i, 14.0, dir, 0.9);
+                self.damage_enemy(i, 14.0, dir, 0.9, warded);
             }
         }
     }
@@ -1019,6 +1020,7 @@ impl Game {
             duration: if step == 2 { 0.28 } else { 0.2 },
             radius: range,
         });
+        let warded = self.warded_mask();
         for i in 0..self.enemies.len() {
             let e = &self.enemies[i];
             if !e.hittable() {
@@ -1027,7 +1029,7 @@ impl Game {
             let to = e.pos - pp;
             let d = to.len();
             if d <= range + e.radius() && (d < 0.01 || to.dot(facing) >= cos_arc * d) {
-                self.damage_enemy(i, dmg, facing, kb);
+                self.damage_enemy(i, dmg, facing, kb, warded);
             }
         }
         // The blade also cuts hostile ink out of the air.
@@ -1110,12 +1112,20 @@ impl Game {
             })
     }
 
-    fn damage_enemy(&mut self, i: usize, dmg: f32, dir: Vec2, knock: f32) -> bool {
+    /// Bit `i` is set while `enemies[i]` is warded. Each strike, dash or bolt
+    /// takes one before it lands, so all of its targets meet the wards as they
+    /// stood, whatever their order in `enemies` or whichever falls first.
+    fn warded_mask(&self) -> u64 {
+        self.wards().fold(0, |m, (_, a)| m | (1 << a))
+    }
+
+    /// `warded` is a `warded_mask` taken before the attack that deals `dmg`.
+    fn damage_enemy(&mut self, i: usize, dmg: f32, dir: Vec2, knock: f32, warded: u64) -> bool {
         if !self.enemies[i].hittable() {
             return false;
         }
         // Any number of wards still cuts damage only once.
-        let dmg = if self.enemies[i].can_be_warded() && self.wards().any(|(_, a)| a == i) {
+        let dmg = if warded & (1 << i) != 0 {
             dmg * WARD_TAKEN
         } else {
             dmg
@@ -1608,6 +1618,7 @@ impl Game {
                 return true;
             }
             let dir = s.velocity.norm();
+            let warded = self.warded_mask();
             for i in 0..self.enemies.len() {
                 let e = &self.enemies[i];
                 let bit = 1u64 << (e.id % 64);
@@ -1616,7 +1627,7 @@ impl Game {
                 }
                 if (e.pos - s.pos).len() < s.radius + e.radius() {
                     s.hit_mask |= bit;
-                    self.damage_enemy(i, s.damage, dir, 0.15);
+                    self.damage_enemy(i, s.damage, dir, 0.15, warded);
                     if !s.pierce {
                         return false;
                     }
@@ -2000,10 +2011,10 @@ mod tests {
         let mut g = arena_game();
         let i = place(&mut g, EnemyKind::Postmaster, Vec2::new(2.0, 0.0));
         g.enemies[i].hp = g.enemies[i].max_hp * 0.5 + 1.0;
-        assert!(g.damage_enemy(i, 5.0, Vec2::new(1.0, 0.0), 0.0));
+        assert!(g.damage_enemy(i, 5.0, Vec2::new(1.0, 0.0), 0.0, 0));
         assert!(g.enemies[i].phase2);
         let hp = g.enemies[i].hp;
-        assert!(!g.damage_enemy(i, 50.0, Vec2::new(1.0, 0.0), 0.0));
+        assert!(!g.damage_enemy(i, 50.0, Vec2::new(1.0, 0.0), 0.0, 0));
         assert_eq!(g.enemies[i].hp, hp);
     }
 
@@ -2634,7 +2645,7 @@ mod tests {
 
     fn hit(g: &mut Game, i: usize) -> f32 {
         let before = g.enemies[i].hp;
-        assert!(g.damage_enemy(i, 10.0, Vec2::new(1.0, 0.0), 0.0));
+        assert!(g.damage_enemy(i, 10.0, Vec2::new(1.0, 0.0), 0.0, g.warded_mask()));
         before - g.enemies[i].hp
     }
 
@@ -2661,10 +2672,36 @@ mod tests {
         let w = place(&mut g, EnemyKind::WardClerk, Vec2::new(1.5, 0.0));
         assert!(near(hit(&mut g, b), 4.0));
         // Fell the source; it has not been removed yet.
-        assert!(g.damage_enemy(w, 1000.0, Vec2::new(1.0, 0.0), 0.0));
+        assert!(g.damage_enemy(w, 1000.0, Vec2::new(1.0, 0.0), 0.0, g.warded_mask()));
         assert!(g.enemies[w].hp <= 0.0);
         assert_eq!(g.wards().count(), 0);
         assert!(near(hit(&mut g, b), 10.0), "full damage at once");
+    }
+
+    #[test]
+    fn ward_holds_through_the_strike_that_fells_its_source() {
+        // One swing reaches both and fells the source. Its ally's cut must not
+        // depend on which of the two comes first in `enemies`.
+        for source_first in [true, false] {
+            let mut g = arena_game();
+            g.player.pos = Vec2::ZERO;
+            g.player.facing = Vec2::new(1.0, 0.0);
+            let (w, b) = if source_first {
+                let w = place(&mut g, EnemyKind::WardClerk, Vec2::new(1.0, 0.4));
+                (w, place(&mut g, EnemyKind::Bailiff, Vec2::new(1.0, -0.4)))
+            } else {
+                let b = place(&mut g, EnemyKind::Bailiff, Vec2::new(1.0, -0.4));
+                (place(&mut g, EnemyKind::WardClerk, Vec2::new(1.0, 0.4)), b)
+            };
+            g.enemies[w].hp = 1.0;
+            let before = g.enemies[b].hp;
+            g.do_strike();
+            assert!(g.enemies[w].hp <= 0.0, "the strike fells the source");
+            assert!(
+                near(before - g.enemies[b].hp, 14.0 * g.mods.strike * WARD_TAKEN),
+                "source first: {source_first}"
+            );
+        }
     }
 
     #[test]

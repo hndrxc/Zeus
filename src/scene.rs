@@ -265,8 +265,7 @@ impl Kind {
             Kind::Bailiff => 84.0,
             Kind::Censor => 78.0,
             Kind::Postmaster => 135.0,
-            // Fixed for the future ward_clerk art (~84-92 px tall).
-            Kind::WardClerk => 88.0,
+            Kind::WardClerk => 80.0,
         }
     }
     fn image(self, facing: Vec2, frame: usize) -> Arc<Image> {
