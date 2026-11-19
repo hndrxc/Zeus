@@ -11,7 +11,7 @@ Extract `dead-letter-windows-x64.zip` and launch `dead-letter.exe`. If you have 
 | Enter, Space or left click | Start from the title screen |
 | WASD or arrow keys | Move relative to the screen |
 | Mouse | Aim at a point on the arena floor |
-| Left mouse button or J | Strike. Hold to chain three swings. A swing can cut hostile projectiles in front of the courier. |
+| Left mouse button or J | Strike. Hold to chain a slash, a backhand and a finishing chop. A swing can cut hostile projectiles in front of the courier. |
 | Right mouse button or K | Cast a ranged seal. Hold to repeat as the cooldown expires. |
 | Space during combat | Dash with brief invulnerability |
 | 1, 2, 3 or click an endorsement | Choose an upgrade between chambers |
@@ -75,4 +75,4 @@ blender -b -P tools/bake_assets.py
 
 Character bakes render Cycles on the first GPU backend Blender finds (OptiX, CUDA, HIP, oneAPI or Metal), denoise there too, and fall back to the CPU without one. Chamber backgrounds always render on the CPU, because overlapping faces on the platform lip and the Sorting Floor rack render differently on the GPU and would change the committed art.
 
-The available jobs are `arena`, `courier`, `bailiff`, `censor`, `ward_clerk` and `postmaster`. To rebuild only the chamber art, run `blender -b -P tools/bake_assets.py -- --only arena`. It writes `assets/arena.png` (Sorting Floor), `assets/arena_vault.png` (Dead Letter Vault) and `assets/arena_office.png` (Postmaster’s Office). All three are 2700 × 1800 and share one registration to the 900 × 600 design space. Each 768 × 768 character frame represents a 256 × 256 sprite in that space. Each character has four orthographic views. Rebuild the executable after a bake to pick up changed PNGs.
+The available jobs are `arena`, `courier`, `bailiff`, `censor`, `ward_clerk` and `postmaster`. To rebuild only the chamber art, run `blender -b -P tools/bake_assets.py -- --only arena`. It writes `assets/arena.png` (Sorting Floor), `assets/arena_vault.png` (Dead Letter Vault) and `assets/arena_office.png` (Postmaster’s Office). All three are 2700 × 1800 and share one registration to the 900 × 600 design space. Each 768 × 768 character frame represents a 256 × 256 sprite in that space. Each character has eight orthographic views. Directions 0 through 3 face +X, +Y, −X and −Y. Directions 4 through 7 face the diagonals at 45°, 135°, 225° and 315° from +X. The courier uses 27 frames per view, with the backhand at 19–22 and the finishing chop at 23–26. Rebuild the executable after a bake to pick up changed PNGs.

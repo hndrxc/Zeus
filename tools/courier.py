@@ -147,10 +147,21 @@ def animate(rig):
         (51,(28,4,-.10,(-48,46),(34,48),(48,-44),(-25,-38))),
         (54,(31,8,-.083,(-57,54),(23,54),(55,-54),(-18,-29))),
         (57,(18,3,-.045,(-32,34),(16,26),(32,-31),(-12,-17))),
+        # Backhand return: the blade comes back across the chest, elbow leading.
+        (61,(12,46,-.035,(-24,22),(12,19),(-82,34),(-16,-28),56)),
+        (63,(14,-18,-.055,(26,-28),(18,12),(-54,25),(-40,-32),-42)),
+        (65,(3,-51,-.022,(23,-19),(12,14),(-28,4),(-67,-35),-66)),
+        (68,(2,-15,-.012,(9,-10),(8,7),(-9,5),(-26,-16),-22)),
+        # Finisher: a high guard breaks into a deep, planted diagonal chop.
+        (72,(-14,-35,.018,(14,-18),(7,12),(-135,-31),(-56,-62),-28)),
+        (74,(27,8,-.084,(-43,37),(24,26),(-76,45),(-10,-28),8)),
+        (77,(35,54,-.115,(-48,41),(34,32),(-9,53),(10,-16),61)),
+        (81,(16,25,-.047,(-24,19),(13,16),(5,18),(-24,-18),33)),
+        (85,rest),
     ]: pose(f,*values)
-    for f,name in ((1,'Ready'),(5,'Run'),(25,'Slash'),(39,'Dispatch seal'),(51,'Dash')):
+    for f,name in ((1,'Ready'),(5,'Run'),(25,'Slash'),(39,'Dispatch seal'),(51,'Dash'),(61,'Backhand'),(72,'Finishing chop')):
         scene.timeline_markers.new(name,frame=f)
-    scene.frame_end=57
+    scene.frame_end=85
     scene.render.fps=30
 
 
@@ -173,9 +184,9 @@ def bake(engine):
     folder=os.path.join(OUT,'courier')
     os.makedirs(folder,exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=os.path.join(OUT,'courier.blend'),compress=True)
-    samples=[1,5,7,9,11,13,15,17,19,25,27,29,32,39,41,44,51,54,57]
-    for direction in range(4):
-        rig[0].rotation_euler.z=math.radians(90*direction)
+    samples=[1,5,7,9,11,13,15,17,19,25,27,29,32,39,41,44,51,54,57,61,63,65,68,72,74,77,81]
+    for direction, angle in enumerate(VIEW_ANGLES):
+        rig[0].rotation_euler.z=math.radians(angle)
         for index,frame in enumerate(samples):
             scene.frame_set(frame)
             path=os.path.join(folder,f'{direction}_{index:02}.png')

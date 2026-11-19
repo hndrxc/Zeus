@@ -105,6 +105,7 @@ def visitors_chair(M):
 
 
 def build(M):
+    floor_seal(M, "Postmaster", "OFFICE OF FINAL DISPATCH", "REGISTER  ·  III")
     office = dict(M,
                   walnut=mat("of_walnut", (0.082, 0.032, 0.018), rough=0.44, coat=0.38),
                   veneer=mat("of_veneer", (0.24, 0.108, 0.048), rough=0.39, coat=0.48),

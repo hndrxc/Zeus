@@ -304,8 +304,8 @@ def bake(name,builder,engine):
     dest.mkdir(parents=True,exist_ok=True)
     scene.frame_set(1)
     bpy.ops.wm.save_as_mainfile(filepath=str(folder/(name+".blend")),compress=True)
-    for direction in range(4):
-        rig[0].rotation_euler.z=direction*math.pi/2
+    for direction, angle in enumerate(VIEW_ANGLES):
+        rig[0].rotation_euler.z=math.radians(angle)
         for i,frame in enumerate(samples):
             scene.frame_set(frame)
             path=dest/f"{direction}_{i:02}.png"

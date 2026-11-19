@@ -66,81 +66,37 @@ static ARENA_VAULT_IMG: LazyLock<Arc<Image>> =
     LazyLock::new(|| png(include_bytes!("../assets/arena_vault.png")));
 static ARENA_OFFICE_IMG: LazyLock<Arc<Image>> =
     LazyLock::new(|| png(include_bytes!("../assets/arena_office.png")));
+// Construct GPUI images on demand as each pose is first used.
+type SpriteFrame = LazyLock<Arc<Image>>;
 macro_rules! sprite_frames {
     ($actor:literal, $direction:literal; $($frame:literal),+) => {
-        [$(png(include_bytes!(concat!("../assets/", $actor, "/", $direction, "_", $frame, ".png")))),+]
+        [$(LazyLock::new(|| png(include_bytes!(concat!("../assets/", $actor, "/", $direction, "_", $frame, ".png"))))),+]
     };
 }
 
-macro_rules! courier_direction {
-    ($direction:literal) => {
-        sprite_frames!("courier", $direction; "00","01","02","03","04","05","06","07","08","09","10","11","12","13","14","15","16","17","18")
-    };
+macro_rules! actor_views {
+    ($actor:literal; $($frame:literal),+) => {{
+        macro_rules! view {
+            ($dir:literal) => { sprite_frames!($actor, $dir; $($frame),+) };
+        }
+        [view!("0"), view!("1"), view!("2"), view!("3"),
+         view!("4"), view!("5"), view!("6"), view!("7")]
+    }};
 }
 
-static COURIER_FRAMES: LazyLock<[[Arc<Image>; 19]; 4]> = LazyLock::new(|| {
-    [
-        courier_direction!("0"),
-        courier_direction!("1"),
-        courier_direction!("2"),
-        courier_direction!("3"),
-    ]
-});
+static COURIER_FRAMES: [[SpriteFrame; 27]; 8] = actor_views!("courier";
+    "00","01","02","03","04","05","06","07","08","09","10","11","12","13","14","15","16","17","18",
+    "19","20","21","22","23","24","25","26");
+static WARD_CLERK_FRAMES: [[SpriteFrame; 9]; 8] = actor_views!("ward_clerk";
+    "00","01","02","03","04","05","06","07","08");
+static BAILIFF_FRAMES: [[SpriteFrame; 14]; 8] = actor_views!("bailiff";
+    "00","01","02","03","04","05","06","07","08","09","10","11","12","13");
+static CENSOR_FRAMES: [[SpriteFrame; 14]; 8] = actor_views!("censor";
+    "00","01","02","03","04","05","06","07","08","09","10","11","12","13");
+static POSTMASTER_FRAMES: [[SpriteFrame; 34]; 8] = actor_views!("postmaster";
+    "00","01","02","03","04","05","06","07","08","09","10","11","12","13","14","15","16","17","18",
+    "19","20","21","22","23","24","25","26","27","28","29","30","31","32","33");
 
-macro_rules! ward_clerk_direction {
-    ($direction:literal) => {
-        sprite_frames!("ward_clerk", $direction; "00","01","02","03","04","05","06","07","08")
-    };
-}
-
-static WARD_CLERK_FRAMES: LazyLock<[[Arc<Image>; 9]; 4]> = LazyLock::new(|| {
-    [
-        ward_clerk_direction!("0"),
-        ward_clerk_direction!("1"),
-        ward_clerk_direction!("2"),
-        ward_clerk_direction!("3"),
-    ]
-});
-macro_rules! enemy_direction {
-    ($actor:literal, $direction:literal $(, $extra:literal)*) => {
-        sprite_frames!($actor,$direction; "00","01","02","03","04","05","06","07","08","09","10","11","12","13" $(,$extra)*)
-    }
-}
-
-macro_rules! enemy_views {
-    ($actor:literal $(, $extra:literal)*) => {
-        [enemy_direction!($actor,"0" $(,$extra)*),enemy_direction!($actor,"1" $(,$extra)*),
-         enemy_direction!($actor,"2" $(,$extra)*),enemy_direction!($actor,"3" $(,$extra)*)]
-    }
-}
-
-static BAILIFF_FRAMES: LazyLock<[[Arc<Image>; 14]; 4]> = LazyLock::new(|| enemy_views!("bailiff"));
-static CENSOR_FRAMES: LazyLock<[[Arc<Image>; 14]; 4]> = LazyLock::new(|| enemy_views!("censor"));
-static POSTMASTER_FRAMES: LazyLock<[[Arc<Image>; 34]; 4]> = LazyLock::new(|| {
-    enemy_views!(
-        "postmaster",
-        "14",
-        "15",
-        "16",
-        "17",
-        "18",
-        "19",
-        "20",
-        "21",
-        "22",
-        "23",
-        "24",
-        "25",
-        "26",
-        "27",
-        "28",
-        "29",
-        "30",
-        "31",
-        "32",
-        "33"
-    )
-});
 fn png(bytes: &'static [u8]) -> Arc<Image> {
     Arc::new(Image::from_bytes(ImageFormat::Png, bytes.to_vec()))
 }
@@ -155,11 +111,14 @@ fn arena_image(chamber: usize) -> Arc<Image> {
     }
 }
 fn courier_image(player: &crate::engine::Player) -> Arc<Image> {
+    const STRIKE_START: [usize; 3] = [9, 19, 23];
     let (facing, frame) = if let Some((dir, progress)) = player.dash_pose() {
         (dir, 16 + (progress * 3.0) as usize)
+    } else if player.strike_windup {
+        (player.facing, STRIKE_START[player.combo as usize])
     } else if let Some((kind, dir, progress)) = player.attack_pose {
-        let frame = if kind == EffectKind::Strike {
-            9 + (progress * 4.0) as usize
+        let frame = if let EffectKind::Strike(step) = kind {
+            STRIKE_START[step as usize] + 1 + (progress * 3.0) as usize
         } else {
             13 + (progress * 3.0) as usize
         };
@@ -176,17 +135,9 @@ fn courier_image(player: &crate::engine::Player) -> Arc<Image> {
 }
 
 fn view_direction(facing: Vec2) -> usize {
-    if facing.x.abs() >= facing.y.abs() {
-        if facing.x >= 0.0 {
-            0
-        } else {
-            2
-        }
-    } else if facing.y >= 0.0 {
-        1
-    } else {
-        3
-    }
+    // The baker keeps cardinal views in slots 0..4 and diagonals in 4..8.
+    let octant = (facing.y.atan2(facing.x) / (PI / 4.0)).round() as i32;
+    [0, 4, 1, 5, 2, 6, 3, 7][octant.rem_euclid(8) as usize]
 }
 
 fn col(hex: u32, a: f32) -> Hsla {
@@ -340,16 +291,8 @@ struct Bolt {
 }
 
 #[derive(Clone, Copy)]
-enum FxKind {
-    Strike,
-    Dash,
-    Hit,
-    Burst,
-}
-
-#[derive(Clone, Copy)]
 struct Fx {
-    kind: FxKind,
+    kind: EffectKind,
     pos: Vec2,
     dir: Vec2,
     age: f32,
@@ -671,7 +614,7 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
         let d = norm(e.dir, Vec2::new(1.0, 0.0));
         let ang = d.y.atan2(d.x);
         match e.kind {
-            FxKind::Dash => {
+            EffectKind::Dash => {
                 let len = e.radius.max(0.6) * 2.2;
                 let tail = (
                     e.pos.x - d.x * len * (0.4 + 0.6 * u),
@@ -702,7 +645,7 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
                     Some((1.8 * fade + 0.4, col(TEAL, 0.6 * fade))),
                 );
             }
-            FxKind::Burst => {
+            EffectKind::Burst => {
                 let r = e.radius.max(0.5) * ease_out(u);
                 pen.arc(
                     e.pos,
@@ -725,7 +668,7 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
                     Some((1.6 * fade + 0.4, col(WAX, 0.55 * fade))),
                 );
             }
-            FxKind::Hit => {
+            EffectKind::Hit => {
                 let r = e.radius.max(0.3) * (0.4 + 0.9 * ease_out(u));
                 pen.arc(
                     e.pos,
@@ -738,10 +681,10 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
                     Some((1.8 * fade + 0.3, col(TEAL, 0.55 * fade))),
                 );
             }
-            FxKind::Strike => {
+            EffectKind::Strike(step) => {
                 // Crescent swept across the strike reach.
                 let reach = e.radius.max(0.5);
-                let half = if e.duration > 0.25 {
+                let half = if step == 2 {
                     FINISHER_HALF_ARC
                 } else {
                     STRIKE_HALF_ARC
@@ -749,6 +692,11 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
                 let sweep = half * (1.0 + 0.2 * ease_out(u));
                 let head = ang - sweep + 2.0 * sweep * ease_out(u * 1.6);
                 let tail = (head - 1.5).max(ang - sweep);
+                let (tail, head) = if step == 1 {
+                    (2.0 * ang - head, 2.0 * ang - tail)
+                } else {
+                    (tail, head)
+                };
                 pen.arc(
                     e.pos,
                     reach * 0.78,
@@ -945,7 +893,7 @@ fn paint_front(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
         let fade = 1.0 - u;
         let d = norm(e.dir, Vec2::new(1.0, 0.0));
         match e.kind {
-            FxKind::Hit => {
+            EffectKind::Hit => {
                 for i in 0..9u32 {
                     let a = hash01(i + 17) * TAU;
                     let v = 0.6 + 1.4 * hash01(i + 41);
@@ -961,7 +909,7 @@ fn paint_front(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
                     );
                 }
             }
-            FxKind::Strike => {
+            EffectKind::Strike(_) => {
                 for i in 0..6u32 {
                     let a = d.y.atan2(d.x) + (hash01(i + 90) - 0.5) * 1.8;
                     let r = e.radius.max(0.9) * (0.7 + 0.5 * hash01(i + 70)) * ease_out(u);
@@ -974,7 +922,7 @@ fn paint_front(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
                     );
                 }
             }
-            FxKind::Burst => {
+            EffectKind::Burst => {
                 for i in 0..14u32 {
                     let a = i as f32 / 14.0 * TAU + hash01(i + 3) * 0.4;
                     let r = e.radius.max(0.5) * (0.5 + 0.55 * hash01(i + 9)) * ease_out(u);
@@ -989,7 +937,7 @@ fn paint_front(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
                     );
                 }
             }
-            FxKind::Dash => {
+            EffectKind::Dash => {
                 for i in 0..5u32 {
                     let off = (i as f32 + 1.0) * 0.28 * ease_out(u);
                     let side = (hash01(i + 55) - 0.5) * 0.5;
@@ -1186,12 +1134,7 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         .effects
         .iter()
         .map(|e| Fx {
-            kind: match &e.kind {
-                EffectKind::Strike => FxKind::Strike,
-                EffectKind::Dash => FxKind::Dash,
-                EffectKind::Hit => FxKind::Hit,
-                EffectKind::Burst => FxKind::Burst,
-            },
+            kind: e.kind,
             pos: e.pos,
             dir: e.dir,
             age: e.age,
@@ -1808,13 +1751,29 @@ mod tests {
     use super::*;
     use crate::engine::Input;
 
-    /// +X, +Y, -X, -Y: the four sprite directions.
-    const DIRECTIONS: [Vec2; 4] = [
+    /// Ordered like the baked file indices.
+    const DIRECTIONS: [Vec2; 8] = [
         Vec2::new(1.0, 0.0),
         Vec2::new(0.0, 1.0),
         Vec2::new(-1.0, 0.0),
         Vec2::new(0.0, -1.0),
+        Vec2::new(DIAG, DIAG),
+        Vec2::new(-DIAG, DIAG),
+        Vec2::new(-DIAG, -DIAG),
+        Vec2::new(DIAG, -DIAG),
     ];
+    const DIAG: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+    #[test]
+    fn nearest_sprite_view_matches_baked_angles() {
+        for (index, facing) in DIRECTIONS.iter().enumerate() {
+            let angle = facing.y.atan2(facing.x);
+            for offset in [-0.38, 0.0, 0.38] {
+                let a = angle + offset;
+                assert_eq!(view_direction(Vec2::new(a.cos(), a.sin())), index);
+            }
+        }
+    }
 
     #[derive(Clone, Copy, Debug)]
     struct Attack {
@@ -1952,7 +1911,7 @@ mod tests {
     }
 
     #[test]
-    fn every_warning_covers_its_damaging_ticks_in_all_four_directions() {
+    fn every_warning_covers_its_damaging_ticks_in_all_eight_directions() {
         let floor = floor();
         for a in ATTACKS {
             for d in DIRECTIONS {
@@ -1989,7 +1948,7 @@ mod tests {
     }
 
     /// A crowded moment: a Bailiff lunging and a Censor volley crossing the
-    /// Postmaster's fan. Rotated to each of the four directions, every hit
+    /// Postmaster's fan. Rotated to each of the eight directions, every hit
     /// lands inside the union of the three warnings, and each warning keeps
     /// its own family. Writes a top-down capture per direction to
     /// `target/warning-capture/` for review.
