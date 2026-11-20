@@ -6,6 +6,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod engine;
+mod floor;
 mod scene;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -164,7 +165,7 @@ impl Shell {
     fn lose_focus(&mut self) {
         self.held = Held::default();
         self.latch = Latch::default();
-        if self.game.phase == Phase::Combat {
+        if matches!(self.game.phase, Phase::Combat | Phase::Explore) {
             self.paused = true;
         }
     }
@@ -217,7 +218,7 @@ impl Shell {
     }
 
     fn live(&self) -> bool {
-        self.game.phase == Phase::Combat && !self.paused
+        matches!(self.game.phase, Phase::Combat | Phase::Explore) && !self.paused
     }
 
     fn build_input(&self) -> Input {
@@ -237,7 +238,7 @@ impl Shell {
         let aim = match self.mouse {
             Some((mx, my)) if !self.keyboard_aim => {
                 let m = metrics(self.viewport.0, self.viewport.1);
-                scene::screen_to_world(mx - m.bx, my - m.by, m.bw, m.bh)
+                scene::screen_to_world(mx - m.bx, my - m.by, m.bw, m.bh, self.game.camera)
             }
             _ => {
                 let f = if len > 0.0 {
@@ -307,16 +308,16 @@ impl Shell {
             }
             "space" if fresh => match self.game.phase {
                 Phase::Ready => self.dispatch(false),
-                Phase::Combat if !self.paused => self.latch.dash = true,
+                Phase::Combat | Phase::Explore if !self.paused => self.latch.dash = true,
                 _ => {}
             },
             "enter" if fresh => match self.game.phase {
                 Phase::Ready => self.dispatch(false),
                 Phase::Won | Phase::Lost => self.restart(false),
-                Phase::Combat if self.paused => self.resume(),
+                Phase::Combat | Phase::Explore if self.paused => self.resume(),
                 _ => {}
             },
-            "tab" if fresh && self.live() => self.skip_drill(),
+            "tab" if fresh && self.live() && self.game.phase == Phase::Combat => self.skip_drill(),
             "t" if fresh => match self.game.phase {
                 Phase::Ready => self.dispatch(true),
                 Phase::Won | Phase::Lost => self.restart(true),
@@ -325,7 +326,7 @@ impl Shell {
             "escape" if fresh => {
                 if self.paused {
                     self.resume();
-                } else if self.game.phase == Phase::Combat {
+                } else if matches!(self.game.phase, Phase::Combat | Phase::Explore) {
                     self.held = Held::default();
                     self.latch = Latch::default();
                     self.paused = true;
@@ -636,13 +637,19 @@ impl Render for Shell {
         let aim = match self.mouse {
             Some((mx, my))
                 if !self.keyboard_aim
-                    && self.game.phase == Phase::Combat
+                    && matches!(self.game.phase, Phase::Combat | Phase::Explore)
                     && mx >= m.bx
                     && mx <= m.bx + m.bw
                     && my >= m.by
                     && my <= m.by + m.bh =>
             {
-                Some(scene::screen_to_world(mx - m.bx, my - m.by, m.bw, m.bh))
+                Some(scene::screen_to_world(
+                    mx - m.bx,
+                    my - m.by,
+                    m.bw,
+                    m.bh,
+                    self.game.camera,
+                ))
             }
             _ => None,
         };
@@ -688,6 +695,7 @@ impl Render for Shell {
             .children(self.hud_boss())
             .child(self.hud_top_right())
             .children(self.hud_drill(cx))
+            .children(self.hud_objective())
             .children(self.overlay(m, cx))
             .when(self.paused || self.game.phase == Phase::Ready, |root| {
                 root.child(self.hud_bottom_controls())
@@ -914,6 +922,7 @@ impl Shell {
         } else {
             match g.phase {
                 Phase::Ready => ("STANDBY", GLOW),
+                Phase::Explore => ("EN ROUTE", GLOW),
                 Phase::Combat if g.lesson.is_some() => ("DRILL", GLOW),
                 Phase::Combat => ("UNDER TOW", WAX),
                 Phase::Choice => ("ENDORSEMENT DUE", BRASS),
@@ -1006,6 +1015,7 @@ impl Shell {
             .child(v_sep())
             .child(stat_cell("TIME", clock(g.time), PEARL));
 
+        // Halls have no hostiles; keep the corner clear for the doorways.
         div()
             .absolute()
             .top(px(18.0))
@@ -1015,7 +1025,7 @@ impl Shell {
             .items_end()
             .gap(px(8.0))
             .child(location_card)
-            .child(telemetry_card)
+            .when(g.phase != Phase::Explore, |col| col.child(telemetry_card))
     }
 
     /// Bottom-centre combat HUD during the opening drill: the action being
@@ -1142,8 +1152,41 @@ impl Shell {
         )
     }
 
+    /// Bottom-centre objective while walking a hall. The full control hints
+    /// show on pause, as in a chamber.
+    fn hud_objective(&self) -> Option<Div> {
+        if self.paused || self.game.phase != Phase::Explore {
+            return None;
+        }
+        Some(
+            div()
+                .absolute()
+                .bottom(px(14.0))
+                .left_0()
+                .w_full()
+                .flex()
+                .justify_center()
+                .child(
+                    hud_card()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(4.0))
+                        .px(px(18.0))
+                        .py(px(8.0))
+                        .child(mono("DELIVERY ROUTE", 9.0, GLOW).font_weight(FontWeight::BOLD))
+                        .child(mono(
+                            "SPACE DASHES · STRIKE AND CAST AT THE CHAMBER",
+                            9.0,
+                            PEARL_DIM,
+                        )),
+                ),
+        )
+    }
+
     /// Bottom-center HUD: subtle BotW-style control button prompts.
     fn hud_bottom_controls(&self) -> Div {
+        let hall = self.game.phase == Phase::Explore;
         div()
             .absolute()
             .bottom(px(14.0))
@@ -1165,10 +1208,15 @@ impl Shell {
                     .border_color(rgba(HUD_BORDER))
                     .child(control_hint("WASD / ARROWS", "Move"))
                     .child(control_hint("MOUSE", "Aim"))
-                    .child(control_hint("LMB / J", "Strike"))
-                    .child(control_hint("RMB / K", "Cast"))
+                    .when(!hall, |row| {
+                        row.child(control_hint("LMB / J", "Strike"))
+                            .child(control_hint("RMB / K", "Cast"))
+                    })
                     .child(control_hint("SPACE", "Dash"))
-                    .child(control_hint("ESC", "Pause")),
+                    .child(control_hint("ESC", "Pause"))
+                    .when(hall, |row| {
+                        row.child(mono("STRIKE AND CAST BEGIN AT THE CHAMBER", 9.0, PEARL_DIM))
+                    }),
             )
     }
 
@@ -1393,7 +1441,7 @@ impl Shell {
             }
             Phase::Won => Some(self.end_card(true, cx)),
             Phase::Lost => Some(self.end_card(false, cx)),
-            _ => None,
+            Phase::Combat | Phase::Explore => None,
         }
     }
 

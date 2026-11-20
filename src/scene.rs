@@ -18,6 +18,7 @@ use crate::engine::{
     EffectKind, Enemy, EnemyKind, Game, Phase, Vec2, ARENA, ATT_CHARGE, ATT_FAN, ATT_RING,
     ATT_SUMMON, SHOCKWAVE_BOLTS,
 };
+use crate::floor::{floor_for, Block, Floor};
 
 const DESIGN_W: f32 = 900.0;
 const DESIGN_H: f32 = 600.0;
@@ -146,28 +147,32 @@ fn col(hex: u32, a: f32) -> Hsla {
     c
 }
 
-/// Uniform fit of the 900x600 design space into the viewport.
+/// Uniform fit of the 900x600 design space into the viewport, with the
+/// camera point `cam` (world) held at the centre of the design view.
 #[derive(Clone, Copy)]
 struct Fit {
     s: f32,
     ox: f32,
     oy: f32,
+    cam: Vec2,
 }
 
 impl Fit {
-    fn new(width: f32, height: f32) -> Self {
+    fn new(width: f32, height: f32, cam: Vec2) -> Self {
         let s = (width / DESIGN_W).min(height / DESIGN_H).max(0.0001);
         Fit {
             s,
             ox: (width - DESIGN_W * s) * 0.5,
             oy: (height - DESIGN_H * s) * 0.5,
+            cam,
         }
     }
 
     /// World (x, y, height z) to viewport pixels.
     fn project(&self, x: f32, y: f32, z: f32) -> (f32, f32) {
-        let dx = 450.0 + 44.0 * (x + y);
-        let dy = 308.0 + 24.2 * (x - y) - 52.0 * z;
+        let (rx, ry) = (x - self.cam.x, y - self.cam.y);
+        let dx = 450.0 + 44.0 * (rx + ry);
+        let dy = 308.0 + 24.2 * (rx - ry) - 52.0 * z;
         (self.ox + dx * self.s, self.oy + dy * self.s)
     }
 
@@ -176,13 +181,155 @@ impl Fit {
         let dy = (sy - self.oy) / self.s - 308.0;
         let u = dx / 44.0;
         let v = dy / 24.2;
-        Vec2::new((u + v) * 0.5, (u - v) * 0.5)
+        Vec2::new(self.cam.x + (u + v) * 0.5, self.cam.y + (u - v) * 0.5)
     }
 }
 
 /// Inverse of the ground projection (z = 0) for the same fit as `render`.
-pub fn screen_to_world(x: f32, y: f32, width: f32, height: f32) -> Vec2 {
-    Fit::new(width, height).unproject(x, y)
+pub fn screen_to_world(x: f32, y: f32, width: f32, height: f32, camera: Vec2) -> Vec2 {
+    Fit::new(width, height, camera).unproject(x, y)
+}
+
+// ------------------------------------------------------------------ halls ---
+
+/// Opacity of the occluder pieces laid back over the courier.
+const OCCLUDER_OPACITY: f32 = 0.45;
+
+/// One occluder piece: the atlas rect `atlas` (x, y, w, h in atlas px) shows
+/// the visible pixels of `block`, which sit at `dest` (design px) in the floor
+/// image.
+struct Piece {
+    block: usize,
+    atlas: (f32, f32, f32, f32),
+    dest: (f32, f32, f32, f32),
+}
+
+/// A hall's baked background and occluder atlas.
+struct HallArt {
+    bg: Arc<Image>,
+    atlas: Arc<Image>,
+    atlas_size: (f32, f32),
+    pieces: Vec<Piece>,
+}
+
+impl HallArt {
+    fn new(bg: &'static [u8], atlas: &'static [u8], table: &str) -> Self {
+        let mut atlas_size = (0.0, 0.0);
+        let mut pieces = Vec::new();
+        for line in table.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut words = line.split_whitespace();
+            let head = words.next();
+            let n: Vec<f32> = words
+                .map(|w| {
+                    w.parse()
+                        .unwrap_or_else(|_| panic!("bad number {w:?} in .occ line {line:?}"))
+                })
+                .collect();
+            match (head, n.as_slice()) {
+                (Some("atlas"), &[w, h]) => atlas_size = (w, h),
+                (Some("piece"), &[block, ax, ay, w, h, dx, dy, dw, dh]) => pieces.push(Piece {
+                    block: block as usize,
+                    atlas: (ax, ay, w, h),
+                    dest: (dx, dy, dw, dh),
+                }),
+                _ => panic!("bad .occ line {line:?}"),
+            }
+        }
+        HallArt {
+            bg: png(bg),
+            atlas: png(atlas),
+            atlas_size,
+            pieces,
+        }
+    }
+}
+
+static SORTING_HALL_ART: LazyLock<HallArt> = LazyLock::new(|| {
+    HallArt::new(
+        include_bytes!("../assets/floors/sorting_hall.png"),
+        include_bytes!("../assets/floors/sorting_hall_occ.png"),
+        include_str!("../assets/floors/sorting_hall.occ"),
+    )
+});
+static VAULT_STACKS_ART: LazyLock<HallArt> = LazyLock::new(|| {
+    HallArt::new(
+        include_bytes!("../assets/floors/vault_stacks.png"),
+        include_bytes!("../assets/floors/vault_stacks_occ.png"),
+        include_str!("../assets/floors/vault_stacks.occ"),
+    )
+});
+
+fn hall_art(id: &str) -> Option<&'static HallArt> {
+    match id {
+        "sorting_hall" => Some(&SORTING_HALL_ART),
+        "vault_stacks" => Some(&VAULT_STACKS_ART),
+        _ => None,
+    }
+}
+
+/// Viewport rect (left, top, width, height) of the floor image: it is placed
+/// so world (0, 0, 0) lands at the camera projection, the same `Fit` that
+/// places every sprite, so image and projection cannot drift apart.
+fn floor_rect(fit: &Fit, floor: &Floor) -> (f32, f32, f32, f32) {
+    let (ox, oy) = fit.project(0.0, 0.0, 0.0);
+    (
+        ox - floor.origin.0 * fit.s,
+        oy - floor.origin.1 * fit.s,
+        floor.image_size.0 * fit.s,
+        floor.image_size.1 * fit.s,
+    )
+}
+
+/// Is `p` on the far side (toward -x or +y) of `b` as seen by the camera,
+/// where the block hides the floor?
+fn behind(p: Vec2, b: &Block) -> bool {
+    (p.x < b.min.x || p.y > b.max.y) && !(p.x > b.max.x || p.y < b.min.y)
+}
+
+/// Translucent copies of every block the courier is behind (and whose pieces
+/// overlap the courier sprite), absolutely placed over the floor image.
+fn occluders(art: &HallArt, floor: &Floor, fit: &Fit, hero: Vec2) -> Vec<Div> {
+    let (left, top, _, _) = floor_rect(fit, floor);
+    let s = fit.s;
+    let (hx, hy) = fit.project(hero.x, hero.y, 0.0);
+    let (sx0, sy0) = (hx - FOOT_X * s, hy - FOOT_Y * s);
+    let (sx1, sy1) = (sx0 + SPRITE * s, sy0 + SPRITE * s);
+    let (aw, ah) = art.atlas_size;
+    art.pieces
+        .iter()
+        .filter(|p| floor.blocks.get(p.block).is_some_and(|b| behind(hero, b)))
+        .filter_map(|p| {
+            let (dx, dy, dw, dh) = p.dest;
+            let (l, t, w, h) = (left + dx * s, top + dy * s, dw * s, dh * s);
+            if l >= sx1 || l + w <= sx0 || t >= sy1 || t + h <= sy0 {
+                return None;
+            }
+            let (ax, ay, _, _) = p.atlas;
+            Some(
+                div()
+                    .absolute()
+                    .left(px(l))
+                    .top(px(t))
+                    .w(px(w))
+                    .h(px(h))
+                    .overflow_hidden()
+                    .opacity(OCCLUDER_OPACITY)
+                    .child(
+                        img(art.atlas.clone())
+                            .absolute()
+                            .left(px(-ax * 0.5 * s))
+                            .top(px(-ay * 0.5 * s))
+                            .w(px(aw * 0.5 * s))
+                            .h(px(ah * 0.5 * s))
+                            .object_fit(ObjectFit::Fill),
+                    ),
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -325,6 +472,8 @@ struct Snapshot {
     fx: Vec<Fx>,
     aim: Option<Vec2>,
     combat: bool,
+    /// Walking a hall: no arena rim, water motes or combat cues.
+    hall: bool,
     chamber: usize,
     /// (source, target) indices into `foes`, straight from `Game::wards`.
     wards: Vec<(usize, usize)>,
@@ -523,7 +672,7 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
     let feather_y = 18.0;
     let edge = gpui::linear_color_stop(col(INK, 1.0), 0.0);
     let clear = gpui::linear_color_stop(col(INK, 0.0), 1.0);
-    if fit.ox > 0.0 {
+    if !snap.hall && fit.ox > 0.0 {
         pen.rect(
             0.0,
             0.0,
@@ -539,7 +688,7 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
             gpui::linear_gradient(270.0, edge, clear),
         );
     }
-    if fit.oy > 0.0 {
+    if !snap.hall && fit.oy > 0.0 {
         pen.rect(
             0.0,
             0.0,
@@ -782,51 +931,62 @@ fn paint_ground(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
                     col(TEAL, if ready { 0.5 } else { 0.18 }),
                 );
             }
-            // Reticle at the aim point; its inner arc refills as the cast cooldown elapses.
-            let charge = if ready {
-                1.0
-            } else {
-                1.0 - (hero.cast_cd / hero.cast_max.max(1e-3)).clamp(0.0, 1.0)
-            };
-            let alpha = if ready { 0.9 } else { 0.35 };
-            let spin = t * 1.2;
-            let rr = 0.3 + 0.03 * (t * 6.0).sin();
-            pen.arc_line(a, rr, spin, spin + 1.2, 0.0, 1.6, col(PEARL, alpha));
-            pen.arc_line(
-                a,
-                rr,
-                spin + PI,
-                spin + PI + 1.2,
-                0.0,
-                1.6,
-                col(PEARL, alpha),
-            );
-            pen.arc_line(
-                a,
-                rr * 0.55,
-                -PI * 0.5,
-                -PI * 0.5 + TAU * charge.max(0.02),
-                0.0,
-                1.4,
-                col(TEAL, alpha * 0.9),
-            );
-            pen.disc(a.x, a.y, 0.0, 1.6, col(WAX, alpha));
+            reticle(&mut pen, &hero, a, t);
         }
-        // Dash recharge arc under the courier.
-        if hero.dash_cd > 0.0 {
-            let k = (hero.dash_cd / hero.dash_max.max(1e-3)).clamp(0.0, 1.0);
-            pen.arc_line(
-                hero.pos,
-                0.62,
-                -PI * 0.5,
-                -PI * 0.5 + TAU * (1.0 - k),
-                0.0,
-                1.4,
-                col(BRASS, 0.55),
-            );
-        } else {
-            pen.arc_line(hero.pos, 0.62, 0.0, TAU, 0.0, 1.0, col(TEAL, 0.28));
-        }
+    }
+    if snap.combat || snap.hall {
+        dash_ring(&mut pen, &hero);
+    }
+}
+
+/// Aim reticle at the aim point; its inner arc refills as the cast cooldown elapses.
+fn reticle(pen: &mut Pen, hero: &Hero, a: Vec2, t: f32) {
+    let ready = hero.cast_cd <= 0.0;
+    let charge = if ready {
+        1.0
+    } else {
+        1.0 - (hero.cast_cd / hero.cast_max.max(1e-3)).clamp(0.0, 1.0)
+    };
+    let alpha = if ready { 0.9 } else { 0.35 };
+    let spin = t * 1.2;
+    let rr = 0.3 + 0.03 * (t * 6.0).sin();
+    pen.arc_line(a, rr, spin, spin + 1.2, 0.0, 1.6, col(PEARL, alpha));
+    pen.arc_line(
+        a,
+        rr,
+        spin + PI,
+        spin + PI + 1.2,
+        0.0,
+        1.6,
+        col(PEARL, alpha),
+    );
+    pen.arc_line(
+        a,
+        rr * 0.55,
+        -PI * 0.5,
+        -PI * 0.5 + TAU * charge.max(0.02),
+        0.0,
+        1.4,
+        col(TEAL, alpha * 0.9),
+    );
+    pen.disc(a.x, a.y, 0.0, 1.6, col(WAX, alpha));
+}
+
+/// Dash recharge arc under the courier.
+fn dash_ring(pen: &mut Pen, hero: &Hero) {
+    if hero.dash_cd > 0.0 {
+        let k = (hero.dash_cd / hero.dash_max.max(1e-3)).clamp(0.0, 1.0);
+        pen.arc_line(
+            hero.pos,
+            0.62,
+            -PI * 0.5,
+            -PI * 0.5 + TAU * (1.0 - k),
+            0.0,
+            1.4,
+            col(BRASS, 0.55),
+        );
+    } else {
+        pen.arc_line(hero.pos, 0.62, 0.0, TAU, 0.0, 1.0, col(TEAL, 0.28));
     }
 }
 
@@ -840,7 +1000,9 @@ fn paint_front(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
     let t = snap.time;
 
     // Rising motes in the petrol water: ambient only, very low contrast.
-    for i in 0..16u32 {
+    // Halls have no water to rise from.
+    let motes = if snap.hall { 0 } else { 16u32 };
+    for i in 0..motes {
         let h1 = hash01(i * 3 + 1);
         let h2 = hash01(i * 3 + 2);
         let h3 = hash01(i * 3 + 3);
@@ -1059,6 +1221,13 @@ fn paint_front(snap: &Snapshot, b: Bounds<Pixels>, win: &mut Window) {
             );
         }
     }
+
+    // Hall floor target: always on top of the scenery and its occluders.
+    if snap.hall {
+        if let Some(a) = snap.aim {
+            reticle(&mut pen, &snap.hero, a, t);
+        }
+    }
 }
 
 fn sprite(
@@ -1091,7 +1260,7 @@ fn sprite(
 
 /// Render the world into a viewport of `width` x `height`; `aim` is a world point.
 pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
-    let fit = Fit::new(width, height);
+    let fit = Fit::new(width, height, world.camera);
     let time = world.time;
     let hero = Hero {
         pos: world.player.pos,
@@ -1143,6 +1312,8 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         })
         .collect();
     let combat = world.phase == Phase::Combat;
+    let hall = world.floor().and_then(|f| hall_art(f.id).map(|a| (f, a)));
+    let in_hall = world.floor().is_some();
     let lost = world.phase == Phase::Lost;
 
     // Depth-sorted actor list: (depth, foe index or None for the courier).
@@ -1164,6 +1335,7 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         fx: fx.clone(),
         aim,
         combat,
+        hall: in_hall,
         chamber: world.chamber,
     });
     let front = Arc::clone(&ground);
@@ -1173,40 +1345,70 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
         .w(px(width))
         .h(px(height))
         .overflow_hidden()
-        .bg(rgb(INK))
-        .child(
-            img(arena_image(world.chamber))
-                .absolute()
-                .left(px(fit.ox))
-                .top(px(fit.oy))
-                .w(px(DESIGN_W * fit.s))
-                .h(px(DESIGN_H * fit.s))
-                .object_fit(ObjectFit::Fill),
+        .bg(rgb(INK));
+    let mut preload: Vec<Arc<Image>> = Vec::new();
+    match hall {
+        Some((floor, art)) => {
+            let (left, top, w, h) = floor_rect(&fit, floor);
+            root = root.child(
+                img(art.bg.clone())
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(w))
+                    .h(px(h))
+                    .object_fit(ObjectFit::Fill),
+            );
+            // The chamber this hall leads to, and this hall's own occluders.
+            preload.push(art.atlas.clone());
+            preload.push(arena_image(world.chamber));
+        }
+        None => {
+            root = root.child(
+                img(arena_image(world.chamber))
+                    .absolute()
+                    .left(px(fit.ox))
+                    .top(px(fit.oy))
+                    .w(px(DESIGN_W * fit.s))
+                    .h(px(DESIGN_H * fit.s))
+                    .object_fit(ObjectFit::Fill),
+            );
+            // The next hall if there is one, else the next arena (in the last
+            // chamber that is the current background and costs nothing). A
+            // finished run restarts in the first hall.
+            let next = match world.phase {
+                Phase::Won | Phase::Lost => floor_for(1),
+                _ => floor_for(world.chamber + 1),
+            };
+            match next.and_then(|f| hall_art(f.id)) {
+                Some(next_art) => {
+                    preload.push(next_art.bg.clone());
+                    preload.push(next_art.atlas.clone());
+                }
+                None => preload.push(arena_image(world.chamber + 1)),
+            }
+        }
+    }
+    // GPUI decodes an image off-thread the first time it is laid out and
+    // draws nothing until then. Lay out whatever comes next, hidden, so it is
+    // ready when the game advances.
+    for image in preload {
+        root = root.child(img(image).absolute().size_0().invisible());
+    }
+    root = root.child(
+        canvas(
+            |_, _, _| (),
+            move |b, _, win, _| paint_ground(&ground, b, win),
         )
-        // GPUI decodes an image off-thread the first time it is laid out and
-        // draws nothing until then. Lay out the next chamber's background,
-        // hidden, so it is ready when `Game::choose` advances. In the last
-        // chamber this is the current background and costs nothing.
-        .child(
-            img(arena_image(world.chamber + 1))
-                .absolute()
-                .size_0()
-                .invisible(),
-        )
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |b, _, win, _| paint_ground(&ground, b, win),
-            )
-            .absolute()
-            .size_full(),
-        );
+        .absolute()
+        .size_full(),
+    );
 
     for (_, who) in order {
         match who {
             None => {
                 let flicker = hero.flash > 0.0 && (time * 40.0).sin() > 0.0;
-                let bob = if combat {
+                let bob = if combat || hall.is_some() {
                     0.0
                 } else {
                     (time * 2.2).sin() * 1.2
@@ -1257,6 +1459,14 @@ pub fn render(world: &Game, aim: Option<Vec2>, width: f32, height: f32) -> Div {
                     1.0,
                 ));
             }
+        }
+    }
+
+    // Local occlusion treatment: where the courier stands behind tall
+    // geometry, a translucent copy of that geometry goes back over it.
+    if let Some((floor, art)) = hall {
+        for piece in occluders(art, floor, &fit, hero.pos) {
+            root = root.child(piece);
         }
     }
 
@@ -1989,7 +2199,7 @@ mod tests {
     }
 
     fn write_capture(direction: usize, zones: &[Zone], floor: &[Vec2], hits: &[Vec2]) {
-        let fit = Fit::new(DESIGN_W, DESIGN_H);
+        let fit = Fit::new(DESIGN_W, DESIGN_H, Vec2::ZERO);
         let pt = |p: Vec2| {
             let (x, y) = fit.project(p.x, p.y, 0.0);
             format!("{x:.1},{y:.1}")
@@ -2036,6 +2246,156 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/warning-capture");
         if std::fs::create_dir_all(&dir).is_ok() {
             let _ = std::fs::write(dir.join(format!("direction-{direction}.svg")), svg);
+        }
+    }
+
+    // ------------------------------------------------------------ halls ---
+
+    const VIEWPORTS: [(f32, f32); 5] = [
+        (820.0, 560.0),
+        (900.0, 600.0),
+        (1280.0, 800.0),
+        (1920.0, 1080.0),
+        (700.0, 1400.0),
+    ];
+    const CAMERAS: [Vec2; 5] = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(6.5, -3.25),
+        Vec2::new(-12.0, 9.5),
+        Vec2::new(21.25, 14.0),
+        Vec2::new(-4.0, -17.5),
+    ];
+
+    #[test]
+    fn unprojection_inverts_projection_for_every_camera_and_viewport() {
+        for (w, h) in VIEWPORTS {
+            for cam in CAMERAS {
+                let fit = Fit::new(w, h, cam);
+                for p in [
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(3.5, -2.0),
+                    Vec2::new(-8.0, 11.0),
+                    Vec2::new(25.0, 30.0),
+                ] {
+                    let (sx, sy) = fit.project(p.x, p.y, 0.0);
+                    let back = screen_to_world(sx, sy, w, h, cam);
+                    assert!(
+                        (back.x - p.x).abs() < 1e-3 && (back.y - p.y).abs() < 1e-3,
+                        "{w}x{h} camera {cam:?}: {p:?} came back as {back:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn camera_at_the_origin_is_the_arena_projection() {
+        for (w, h) in VIEWPORTS {
+            let fit = Fit::new(w, h, Vec2::ZERO);
+            let (sx, sy) = fit.project(2.0, -1.5, 1.0);
+            let dx = 450.0 + 44.0 * (2.0 - 1.5);
+            let dy = 308.0 + 24.2 * (2.0 + 1.5) - 52.0;
+            assert!((sx - (fit.ox + dx * fit.s)).abs() < 1e-3);
+            assert!((sy - (fit.oy + dy * fit.s)).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn camera_point_lands_at_the_design_view_centre() {
+        for (w, h) in VIEWPORTS {
+            for cam in CAMERAS {
+                let fit = Fit::new(w, h, cam);
+                let (sx, sy) = fit.project(cam.x, cam.y, 0.0);
+                assert!((sx - (fit.ox + 450.0 * fit.s)).abs() < 1e-3);
+                assert!((sy - (fit.oy + 308.0 * fit.s)).abs() < 1e-3);
+            }
+        }
+    }
+
+    #[test]
+    fn a_world_point_maps_to_the_same_floor_image_pixel_everywhere() {
+        for chamber in [1, 2] {
+            let floor = floor_for(chamber).expect("hall");
+            for (w, h) in VIEWPORTS {
+                for cam in CAMERAS {
+                    let fit = Fit::new(w, h, cam);
+                    let (left, top, iw, ih) = floor_rect(&fit, floor);
+                    assert!((iw - floor.image_size.0 * fit.s).abs() < 1e-3);
+                    assert!((ih - floor.image_size.1 * fit.s).abs() < 1e-3);
+                    for p in [floor.entrance, floor.bounds_max, Vec2::new(-3.0, 4.5)] {
+                        let (sx, sy) = fit.project(p.x, p.y, 0.0);
+                        let px = (sx - left) / fit.s;
+                        let py = (sy - top) / fit.s;
+                        let want_x = floor.origin.0 + 44.0 * (p.x + p.y);
+                        let want_y = floor.origin.1 + 24.2 * (p.x - p.y);
+                        assert!(
+                            (px - want_x).abs() < 2e-3 && (py - want_y).abs() < 2e-3,
+                            "{} {w}x{h} camera {cam:?}: {p:?} at image ({px}, {py}), want ({want_x}, {want_y})",
+                            floor.id
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_over_a_floor_point_aims_at_it_after_the_camera_moves() {
+        let floor = floor_for(1).expect("hall");
+        let target = floor.bounds_max;
+        for (w, h) in VIEWPORTS {
+            for cam in CAMERAS {
+                let fit = Fit::new(w, h, cam);
+                let (sx, sy) = fit.project(target.x, target.y, 0.0);
+                let aim = screen_to_world(sx, sy, w, h, cam);
+                assert!((aim.x - target.x).abs() < 1e-3 && (aim.y - target.y).abs() < 1e-3);
+            }
+        }
+    }
+
+    fn slab(x0: f32, y0: f32, x1: f32, y1: f32) -> Block {
+        Block {
+            min: Vec2::new(x0, y0),
+            max: Vec2::new(x1, y1),
+        }
+    }
+
+    #[test]
+    fn courier_is_behind_a_block_only_on_its_far_sides() {
+        let b = slab(0.0, 0.0, 4.0, 2.0);
+        // Far sides: toward -x, toward +y.
+        assert!(behind(Vec2::new(-1.0, 1.0), &b));
+        assert!(behind(Vec2::new(2.0, 3.0), &b));
+        assert!(behind(Vec2::new(-1.0, 3.0), &b));
+        // Near sides: toward +x, toward -y.
+        assert!(!behind(Vec2::new(5.0, 1.0), &b));
+        assert!(!behind(Vec2::new(2.0, -1.0), &b));
+        assert!(!behind(Vec2::new(5.0, -1.0), &b));
+        // Corners that are far on one axis and near on the other are beside it.
+        assert!(!behind(Vec2::new(-1.0, -1.0), &b));
+        assert!(!behind(Vec2::new(5.0, 3.0), &b));
+        // Inside the footprint is never behind.
+        assert!(!behind(Vec2::new(2.0, 1.0), &b));
+    }
+
+    #[test]
+    fn occluder_tables_name_real_blocks_and_fit_inside_their_atlas() {
+        for chamber in [1, 2] {
+            let floor = floor_for(chamber).expect("hall");
+            let art = hall_art(floor.id).expect("art");
+            assert!(!art.pieces.is_empty(), "{} has no occluders", floor.id);
+            for p in &art.pieces {
+                assert!(
+                    p.block < floor.blocks.len(),
+                    "{}: block {}",
+                    floor.id,
+                    p.block
+                );
+                assert!(p.atlas.0 + p.atlas.2 <= art.atlas_size.0 + 0.5);
+                assert!(p.atlas.1 + p.atlas.3 <= art.atlas_size.1 + 0.5);
+                assert!((p.dest.2 - p.atlas.2 * 0.5).abs() < 0.51);
+                assert!((p.dest.3 - p.atlas.3 * 0.5).abs() < 0.51);
+            }
         }
     }
 }
