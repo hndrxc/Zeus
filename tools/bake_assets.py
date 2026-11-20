@@ -7,9 +7,11 @@ The arena is framed in a 900x600 layout with ground origin (450,308).
 Sprites use a 256x256 layout with foot anchor (128,176). SS controls output
 pixels per layout pixel; the orthographic projection uses PX layout pixels per unit.
 """
-import bpy, bmesh, sys, os, math, random
+import bpy, bmesh, sys, os, math, random, time
 from mathutils import Vector, Matrix
 from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "assets")
@@ -815,6 +817,321 @@ def build_postmaster(M):
     light("POINT", (1.2, 0, 1.6), 55, (1.0, 0.55, 0.25), 0.3)
 
 
+# --------------------------------------------------------------- explorable floors
+FLOOR_SS = 2
+
+
+def load_floor(path):
+    """Read the gameplay layout. Preserve block line order for the runtime atlas."""
+    path = Path(path)
+    layout = SimpleNamespace(blocks=[], doors={}, routes={}, views={})
+    arity = {"floor": 1, "image": 4, "bounds": 4, "entrance": 4, "landmark": 2,
+             "block": 6, "door": 5, "view": 3}
+    named = {"block": ("wall", "counter", "table", "rack", "stack", "railing", "landmark"),
+             "door": ("stop", "side"), "route": ("main", "loop", "side"),
+             "view": ("arrival", "junction", "return")}
+    singles = {"floor", "image", "bounds", "entrance", "landmark"}
+    seen = set()
+    line_no = 0
+
+    def fail(message):
+        raise ValueError(f"{path}:{line_no}: {message}")
+
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        fields = line.partition("#")[0].split()
+        if not fields:
+            continue
+        key, *args = fields
+        if key == "route":
+            if len(args) < 5 or len(args) % 2 != 1:
+                fail("route needs a name and at least two (x, y) pairs")
+        elif key not in arity:
+            fail(f"unknown record {key!r}")
+        elif len(args) != arity[key]:
+            fail(f"{key} expects {arity[key]} fields, got {len(args)}")
+        if key in singles:
+            if key in seen:
+                fail(f"duplicate {key}")
+            seen.add(key)
+        if key == "floor":
+            if args[0] != path.stem:
+                fail(f"floor id must match file stem {path.stem!r}")
+            layout.id = args[0]
+            continue
+        if key in named:
+            name = args.pop(0)
+            if name not in named[key]:
+                fail(f"unknown {key} kind {name!r}")
+        try:
+            values = tuple(map(float, args))
+        except ValueError as exc:
+            fail(str(exc))
+        if not all(map(math.isfinite, values)):
+            fail(f"{key} coordinates must be finite")
+        if key in ("block", "door", "bounds"):
+            x0, y0, x1, y1 = values[:4]
+            if x0 >= x1 or y0 >= y1:
+                fail(f"{key} rectangle must have positive extents")
+        if key == "block":
+            if values[4] <= 0:
+                fail("block height must be positive")
+            layout.blocks.append(SimpleNamespace(index=len(layout.blocks), kind=name,
+                                                 x0=x0, y0=y0, x1=x1, y1=y1, h=values[4]))
+        elif key in named:
+            records = getattr(layout, key + "s")
+            if name in records:
+                fail(f"duplicate {key} {name}")
+            records[name] = list(zip(values[::2], values[1::2])) if key == "route" else values
+        else:
+            if key == "image":
+                w, h, ox, oy = values
+                if not (w.is_integer() and h.is_integer() and w > 0 and h > 0):
+                    fail("image needs positive integer width and height")
+                values = (int(w), int(h), ox, oy)
+            setattr(layout, key, values)
+
+    line_no += 1
+    for key in sorted(singles - seen):
+        fail(f"missing {key}")
+    for key in ("door", "route", "view"):
+        for name in named[key]:
+            if name not in getattr(layout, key + "s"):
+                fail(f"missing {key} {name}")
+    if not layout.blocks:
+        fail("missing blocks")
+    return layout
+
+
+def floor_scene(engine, layout):
+    """Fresh floor scene with the arena camera, shifted so world origin lands at (OX, OY).
+
+    World (x, y, z) then lands at design px (OX + 44(x+y), OY + 24.2(x-y) - 52z),
+    matching the contract. setup() only sets shift_y, as (OY - H/2)/W design px
+    expressed against the 2W-pixel render width; shift_x is the same derivation
+    along the horizontal axis, negated because a positive Blender shift_x moves
+    the projected point left."""
+    fresh()
+    M = P()
+    W, H, OX, OY = layout.image
+    # CPU only, like arena_scene: coplanar floor/block faces must resolve the
+    # same way on every bake.
+    setup(2 * W, 2 * H, W / PX, (OY - H / 2) * FLOOR_SS, False, engine, samples=64, gpu=False)
+    bpy.context.scene.camera.data.shift_x = -(OX - W / 2) / W
+    return M
+
+
+def floor_registration(layout):
+    """Contract projection vs Blender camera for layout control points.
+
+    Covers the entrance, both door rectangles and block corners at z=0 and z=h.
+    Returns the max error in design px; raises at the 0.5 px contract limit."""
+    from bpy_extras.object_utils import world_to_camera_view
+    W, H, OX, OY = layout.image
+    sc = bpy.context.scene
+    bpy.context.view_layer.update()
+    points = [tuple(layout.entrance[:2]) + (0.0,)]
+    for x0, y0, x1, y1 in layout.doors.values():
+        points += [(x0, y0, 0.0), (x1, y0, 0.0), (x0, y1, 0.0), (x1, y1, 0.0)]
+    picked, seen = [], set()
+    for b in (layout.blocks[0], max(layout.blocks, key=lambda b: b.h),
+              layout.blocks[len(layout.blocks) // 2]):
+        if b.index not in seen:
+            seen.add(b.index)
+            picked.append(b)
+    for b in picked:
+        for z in (0.0, b.h):
+            points += [(b.x0, b.y0, z), (b.x1, b.y1, z)]
+    worst = 0.0
+    for x, y, z in points:
+        v = world_to_camera_view(sc, sc.camera, Vector((x, y, z)))
+        ax, ay = v.x * W, (1 - v.y) * H
+        ex, ey = OX + 44 * (x + y), OY + 24.2 * (x - y) - 52 * z
+        worst = max(worst, math.hypot(ax - ex, ay - ey))
+    print(f"registration {layout.id}: {len(points)} points, max error {worst:.4f} design px")
+    if worst >= 0.5:
+        raise ValueError(f"{layout.id}: registration error {worst:.4f} design px >= 0.5")
+    return worst
+
+
+def graybox_floor(M, layout):
+    """Plain-box stand-in for a floor: slab, cut edge, dark water, tagged blocks,
+    door marks and neutral lights. Used with --graybox and before the floor script exists."""
+    x0, y0, x1, y1 = layout.bounds
+    cx, cy, dx, dy = (x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0
+    floor_m = mat("graybox floor", (0.045, 0.11, 0.125), 0.0, 0.8)
+    edge_m = mat("graybox edge", (0.42, 0.30, 0.10), 0.6, 0.5)
+    box((cx, cy, -0.25), (dx, dy, 0.5), floor_m, name="floor_slab")
+    # Cut slab edge: a brass-dark trim frame on the slab perimeter.
+    box((cx, y0 + 0.06, 0.01), (dx, 0.12, 0.04), edge_m, name="slab_edge")
+    box((cx, y1 - 0.06, 0.01), (dx, 0.12, 0.04), edge_m, name="slab_edge")
+    box((x0 + 0.06, cy, 0.01), (0.12, dy, 0.04), edge_m, name="slab_edge")
+    box((x1 - 0.06, cy, 0.01), (0.12, dy, 0.04), edge_m, name="slab_edge")
+    # Dark water below, like arena_under: margins fade to the INK abyss.
+    ink_m = bpy.data.materials.new("graybox ink")
+    ink_m.use_nodes = True
+    ink_tree = ink_m.node_tree
+    ink_tree.nodes.clear()
+    ink_em = ink_tree.nodes.new("ShaderNodeEmission")
+    ink_em.inputs["Color"].default_value = (0.002, 0.006, 0.007, 1.0)
+    ink_em.inputs["Strength"].default_value = 1.0
+    ink_out = ink_tree.nodes.new("ShaderNodeOutputMaterial")
+    ink_tree.links.new(ink_em.outputs[0], ink_out.inputs[0])
+    box((cx, cy, -3.2), (dx + 90, dy + 90, 0.4), ink_m, name="water")
+    kind_colors = {
+        "wall": (0.36, 0.39, 0.43), "counter": (0.46, 0.39, 0.30),
+        "table": (0.38, 0.43, 0.33), "rack": (0.30, 0.37, 0.43),
+        "stack": (0.43, 0.35, 0.39), "railing": (0.56, 0.56, 0.59),
+        "landmark": (0.85, 0.62, 0.18),
+    }
+    for b in layout.blocks:
+        ob = box(((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, b.h / 2),
+                 (b.x1 - b.x0, b.y1 - b.y0, b.h),
+                 mat(f"graybox {b.kind}", kind_colors[b.kind], 0.0, 0.65),
+                 name=f"block_{b.index}")
+        ob["block"] = b.index
+    for kind, (x0, y0, x1, y1) in layout.doors.items():
+        if kind == "stop":
+            m = mat("graybox stop", (0.25, 0.12, 0.03), 0.0, 0.6,
+                    emit=(1.0, 0.55, 0.15), strength=0.9)
+        else:
+            m = mat("graybox side", (0.14, 0.07, 0.28), 0.0, 0.6,
+                    emit=(0.55, 0.35, 1.0), strength=0.9)
+        box(((x0 + x1) / 2, (y0 + y1) / 2, 0.01), (x1 - x0, y1 - y0, 0.02), m,
+            name=f"door_{kind}")
+    light("SUN", (-0.7, -1.0, 1.6), 3.0, (1.0, 0.92, 0.8))
+    light("SUN", (1.0, 0.6, 0.9), 1.0, (0.35, 0.85, 1.0))
+    world_color((0.004, 0.011, 0.013), 1.0)
+
+
+def floor_occluders(layout, png_path):
+    """Render the object-index pass and pack visible block pieces into the atlas.
+
+    Piece RGB is copied from the encoded background PNG, so it matches the
+    background byte for byte. Alpha is the hard visible-surface mask from the
+    index pass (pass_index = block + 1 on every tagged object)."""
+    import numpy as np
+    import OpenImageIO as oiio
+    sc = bpy.context.scene
+    tagged = {}
+    for ob in sc.objects:
+        if "block" not in ob:
+            continue
+        index = int(ob["block"])
+        if not 0 <= index < len(layout.blocks):
+            raise ValueError(f"{ob.name}: block tag {index} out of range")
+        ob.pass_index = index + 1
+        tagged.setdefault(index, []).append(ob.name)
+    work = Path(ROOT) / "target" / "floors" / layout.id
+    work.mkdir(parents=True, exist_ok=True)
+    for stale in work.glob("*.exr"):
+        stale.unlink()
+    view_layer = sc.view_layers[0]
+    view_layer.use_pass_object_index = True
+    view_layer.update_render_passes()
+    group = bpy.data.node_groups.new("floor_index", "CompositorNodeTree")
+    sc.compositing_node_group = group
+    layers = group.nodes.new("CompositorNodeRLayers")
+    dump = group.nodes.new("CompositorNodeOutputFile")
+    dump.directory = str(work) + os.sep
+    dump.file_name = "index"
+    dump.format.file_format = "OPEN_EXR_MULTILAYER"
+    dump.file_output_items.new("FLOAT", "idx")
+    group.links.new(layers.outputs["Object Index"], dump.inputs[0])
+    bpy.ops.render.render(write_still=False)
+    exrs = sorted(work.glob("*.exr"))
+    if len(exrs) != 1:
+        raise ValueError(f"{layout.id}: expected one index EXR, found {exrs}")
+    index_buf = oiio.ImageBuf(str(exrs[0]))
+    index = np.array(index_buf.get_pixels("float"), dtype=np.float32)
+    bg_buf = oiio.ImageBuf(str(png_path))
+    bg = np.array(bg_buf.get_pixels("uint8"), dtype=np.uint8)
+    W, H = layout.image[0], layout.image[1]
+    if index.shape[:2] != (2 * H, 2 * W) or bg.shape != (2 * H, 2 * W, 3):
+        raise ValueError(f"{layout.id}: pass/background size mismatch "
+                         f"{index.shape} vs {bg.shape}")
+    index = index[..., 0] if index.ndim == 3 else index
+    bx0, by0, bx1, by1 = layout.bounds
+    pieces = []
+    for b in layout.blocks:
+        # Far boundary walls are never in front of walkable floor: no piece.
+        if b.kind == "wall" and (b.x1 <= bx0 or b.y0 >= by1):
+            continue
+        rows, cols = np.where(index == b.index + 1)
+        if rows.size == 0:
+            raise ValueError(f"{layout.id}: block {b.index} ({b.kind}) has no visible pixels")
+        r0, r1, c0, c1 = rows.min(), rows.max() + 1, cols.min(), cols.max() + 1
+        rgba = np.zeros((r1 - r0, c1 - c0, 4), dtype=np.uint8)
+        rgba[..., :3] = bg[r0:r1, c0:c1]
+        rgba[..., 3] = np.where(index[r0:r1, c0:c1] == b.index + 1, 255, 0)
+        pieces.append(SimpleNamespace(block=b.index, rgba=rgba, w=c1 - c0, h=r1 - r0,
+                                      dx=c0 / FLOOR_SS, dy=r0 / FLOOR_SS))
+    pad, max_w = 2, 4096
+    x = y = row_h = atlas_w = 0
+    for p in sorted(pieces, key=lambda p: (-p.h, p.block)):
+        if x + p.w > max_w:
+            x, y, row_h = 0, y + row_h + pad, 0
+        p.ax, p.ay = x, y
+        x += p.w + pad
+        row_h = max(row_h, p.h)
+        atlas_w = max(atlas_w, p.ax + p.w)
+    atlas_h = y + row_h
+    atlas = np.zeros((atlas_h, atlas_w, 4), dtype=np.uint8)
+    for p in pieces:
+        atlas[p.ay:p.ay + p.h, p.ax:p.ax + p.w] = p.rgba
+    out_png = Path(png_path).with_name(f"{layout.id}_occ.png")
+    atlas_buf = oiio.ImageBuf(oiio.ImageSpec(atlas_w, atlas_h, 4, "uint8"))
+    atlas_buf.set_pixels(oiio.ROI(0, atlas_w, 0, atlas_h, 0, 1), atlas.tobytes())
+    if not atlas_buf.write(str(out_png)):
+        raise OSError(f"failed to write {out_png}: {atlas_buf.geterror()}")
+
+    def num(value):
+        value = float(value)
+        return str(int(value)) if value.is_integer() else repr(value)
+
+    table = ["# generated by tools/bake_assets.py; do not edit",
+             f"atlas {atlas_w} {atlas_h}"]
+    for p in sorted(pieces, key=lambda p: p.block):
+        table.append(f"piece {p.block} {p.ax} {p.ay} {p.w} {p.h} "
+                     f"{num(p.dx)} {num(p.dy)} {num(p.w / FLOOR_SS)} {num(p.h / FLOOR_SS)}")
+    Path(png_path).with_name(f"{layout.id}.occ").write_text("\n".join(table) + "\n", encoding="utf-8")
+    print(f"occluders {layout.id}: {len(pieces)} pieces, atlas {atlas_w}x{atlas_h}")
+    print("WROTE", out_png)
+
+
+FLOOR_SCRIPTS = {"sorting_hall": "floor_sorting.py", "vault_stacks": "floor_vault.py"}
+
+
+def bake_floor(floor_id, engine, graybox, gpu_preview):
+    import runpy
+    started = time.perf_counter()
+    layout = load_floor(os.path.join(ROOT, "assets", "floors", floor_id + ".floor"))
+    M = floor_scene(engine, layout)
+    floor_registration(layout)
+    script = os.path.join(ROOT, "tools", FLOOR_SCRIPTS[floor_id])
+    if not graybox and os.path.exists(script):
+        # Same runpy pattern as the arena landmarks: the floor script sees this
+        # module's globals (bpy, mat, box, light, ...) and builds the whole floor.
+        runpy.run_path(script, init_globals=globals())["build"](M, layout, random.Random(7))
+    else:
+        graybox_floor(M, layout)
+    if gpu_preview:
+        # Dev-only GPU preview at reduced samples; never writes to assets/.
+        sc = bpy.context.scene
+        use_gpu(sc)
+        sc.cycles.samples = 24
+        os.makedirs(PREVIEW, exist_ok=True)
+        render(os.path.join(PREVIEW, floor_id + "_preview.png"))
+        print(f"floor preview {floor_id}: {time.perf_counter() - started:.1f}s (gpu)")
+        return
+    out_dir = os.path.join(OUT, "floors")
+    os.makedirs(out_dir, exist_ok=True)
+    png = os.path.join(out_dir, floor_id + ".png")
+    render(png)
+    floor_occluders(layout, png)
+    print(f"floor {floor_id}: {time.perf_counter() - started:.1f}s "
+          f"({'graybox' if graybox else 'scripted'})")
+
+
 # --------------------------------------------------------------- driver
 def render(path):
     bpy.context.scene.render.filepath = path
@@ -864,6 +1181,8 @@ def main():
         os.makedirs(PREVIEW, exist_ok=True)
     if "--engine" in argv:
         engine = argv[argv.index("--engine") + 1].upper()
+    graybox = "--graybox" in argv
+    gpu_preview = "--gpu-preview" in argv or "--dev" in argv
     only = []
     if "--only" in argv:
         i = argv.index("--only") + 1
@@ -875,6 +1194,8 @@ def main():
         "arena": lambda: bake_arena(engine),
         "courier": lambda: bake_courier(engine),
         "bailiff": lambda: bake_enemy("bailiff", build_bailiff, engine),
+        "sorting_hall": lambda: bake_floor("sorting_hall", engine, graybox, gpu_preview),
+        "vault_stacks": lambda: bake_floor("vault_stacks", engine, graybox, gpu_preview),
         "censor": lambda: bake_enemy("censor", build_censor, engine),
         "postmaster": lambda: bake_enemy("postmaster", build_postmaster, engine),
         "ward_clerk": lambda: bake_ward_clerk(engine),
