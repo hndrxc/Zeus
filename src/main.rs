@@ -1175,6 +1175,7 @@ impl Shell {
                         .px(px(18.0))
                         .py(px(8.0))
                         .child(mono("DELIVERY ROUTE", 9.0, GLOW).font_weight(FontWeight::BOLD))
+                        .child(mono("Follow the hall to the chamber door.", 11.0, PEARL))
                         .child(mono(
                             "SPACE DASHES · STRIKE AND CAST AT THE CHAMBER",
                             9.0,
