@@ -16,12 +16,17 @@ Extract `dead-letter-windows-x64.zip` and launch `dead-letter.exe`. If you have 
 | Space during combat | Dash with brief invulnerability |
 | 1, 2, 3 or click an endorsement | Choose an upgrade between chambers |
 | Esc | Pause or resume combat. Losing window focus also pauses combat. |
+| O or click Settings on the title or pause menu | Open Settings |
 | Enter, R or click Fresh run | Start a fresh run after victory or defeat |
 | P or click Retry same seed | Retry the finished delivery after victory or defeat |
 | Tab or click Skip drill | Skip the opening drill |
 | T on the title or results screen | Start a run that opens with the drill |
 
 For keyboard-only play, J and K aim in the movement direction, or along the courier’s last facing when standing still. Move the mouse to return to pointer aiming.
+
+Settings lets you hide the in-arena aim marker without changing how aiming works, or hide the title and pause control hints. Changes save immediately for the current user and survive game restarts. **Reset Defaults** turns both options back on. Missing, damaged or older settings files start the game with defaults.
+
+The file is `%APPDATA%\dead-letter\settings.json` on Windows, `~/Library/Application Support/dead-letter/settings.json` on macOS, and `$XDG_CONFIG_HOME/dead-letter/settings.json` (or `~/.config/dead-letter/settings.json`) on Linux.
 
 The results screen shows the full delivery seed. A same-seed retry goes straight to the waves, skipping the drill, and repeats the waves and endorsement offers when you use the same inputs and make the same choices.
 
@@ -56,6 +61,7 @@ To publish, update the package version in Cargo.toml and Cargo.lock, merge the t
 | --- | --- |
 | [src/engine.rs](src/engine.rs) | Advances the game one 60 Hz tick at a time. Owns player and enemy state, collisions, projectiles, waves, endorsements, and simulation tests. |
 | [src/main.rs](src/main.rs) | Hosts the GPUI window. Translates key and mouse events into game inputs, drives the fixed-step clock, and draws the full-screen HUD and menus. |
+| [src/settings.rs](src/settings.rs) | Loads and saves versioned per-user preferences. |
 | [src/scene.rs](src/scene.rs) | Projects world positions onto the arena, maps cursor positions back to the ground, selects sprite frames, and layers actors, attack warnings and effects. |
 | [assets/](assets/) | Contains the baked chamber backgrounds, directional animation frames, character stills and editable Blender character scenes. |
 | [tools/](tools/) | Contains the procedural Blender bake driver, the Dead Letter Vault and Postmaster’s Office landmark scripts, and actor-specific rigging and animation code. |
