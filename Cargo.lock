@@ -1263,6 +1263,7 @@ name = "dead-letter"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "serde_json",
 ]
 
 [[package]]

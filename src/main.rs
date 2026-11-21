@@ -8,20 +8,22 @@
 mod engine;
 mod floor;
 mod scene;
+mod settings;
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     div, prelude::*, px, relative, rgb, rgba, size, App, Application, Bounds, Context, Div,
     FocusHandle, FontWeight, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Render, SharedString, Styled, Subscription, Task, TitlebarOptions,
-    Window, WindowBounds, WindowOptions,
+    MouseUpEvent, ParentElement, Render, SharedString, Stateful, Styled, Subscription, Task,
+    TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 
 use engine::{
     Boon, BoonPreview, Change, EnemyKind, Game, Input, Lesson, Phase, Vec2, CHAMBERS,
     HEAL_BETWEEN_CHAMBERS,
 };
+use settings::{Settings, SettingsStore};
 
 // ---------------------------------------------------------------- palette ---
 const INK: u32 = 0x060f12; // abyss slate matching outer arena water
@@ -97,6 +99,10 @@ struct Shell {
     boons: Vec<Boon>,
     /// The opening drill has run (or been skipped) this session.
     drilled: bool,
+    settings_store: SettingsStore,
+    settings: Settings,
+    settings_open: bool,
+    settings_error: Option<String>,
     _loop: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -144,6 +150,9 @@ impl Shell {
             }
         });
 
+        let settings_store = SettingsStore::for_user();
+        let settings = settings_store.load();
+
         Shell {
             game: Game::new(clock_seed()),
             focus,
@@ -156,6 +165,10 @@ impl Shell {
             viewport: (1280.0, 800.0),
             boons: Vec::new(),
             drilled: false,
+            settings_store,
+            settings,
+            settings_open: false,
+            settings_error: None,
             _loop: task,
             _subs: subs,
         }
@@ -215,6 +228,56 @@ impl Shell {
             self.latch = Latch::default();
             self.acc = 0.0;
         }
+    }
+
+    fn can_open_settings(&self) -> bool {
+        self.game.phase == Phase::Ready || self.paused
+    }
+
+    fn open_settings(&mut self) {
+        if self.can_open_settings() {
+            self.held = Held::default();
+            self.latch = Latch::default();
+            self.settings_error = None;
+            self.settings_open = true;
+        }
+    }
+
+    fn close_settings(&mut self) {
+        self.settings_open = false;
+        self.settings_error = None;
+        self.held = Held::default();
+        self.latch = Latch::default();
+        self.acc = 0.0;
+    }
+
+    /// Persist `candidate`; it only becomes current when the save succeeds.
+    fn apply_settings(&mut self, candidate: Settings) {
+        match self.settings_store.save(candidate) {
+            Ok(()) => {
+                self.settings = candidate;
+                self.settings_error = None;
+            }
+            Err(err) => {
+                self.settings_error = Some(format!("COULD NOT SAVE SETTINGS: {err}"));
+            }
+        }
+    }
+
+    fn toggle_aim_marker(&mut self) {
+        let mut next = self.settings;
+        next.show_aim_marker = !next.show_aim_marker;
+        self.apply_settings(next);
+    }
+
+    fn toggle_control_hints(&mut self) {
+        let mut next = self.settings;
+        next.show_control_hints = !next.show_control_hints;
+        self.apply_settings(next);
+    }
+
+    fn reset_settings(&mut self) {
+        self.apply_settings(Settings::default());
     }
 
     fn live(&self) -> bool {
@@ -287,7 +350,21 @@ impl Shell {
     fn key_down(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) {
         let key = e.keystroke.key.as_str();
         let fresh = !e.is_held;
+        if self.settings_open {
+            if fresh {
+                match key {
+                    "1" => self.toggle_aim_marker(),
+                    "2" => self.toggle_control_hints(),
+                    "r" => self.reset_settings(),
+                    "escape" => self.close_settings(),
+                    _ => {}
+                }
+            }
+            cx.notify();
+            return;
+        }
         match key {
+            "o" if fresh && self.can_open_settings() => self.open_settings(),
             "w" | "up" => self.held.up = true,
             "s" | "down" => self.held.down = true,
             "a" | "left" => self.held.left = true,
@@ -365,6 +442,11 @@ impl Shell {
 
     fn mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
+        if self.settings_open {
+            // Settings swallows every press that is not on one of its controls.
+            cx.notify();
+            return;
+        }
         self.mouse = Some((f32::from(e.position.x), f32::from(e.position.y)));
         self.keyboard_aim = false;
         if self.live() {
@@ -402,6 +484,63 @@ impl Shell {
             self.keyboard_aim = false;
         }
     }
+}
+
+/// Clickable menu row: keycap, label and optional ON/OFF state. The press is
+/// consumed here so it never reaches the whole-screen dispatch/resume/attack
+/// handler.
+fn menu_button(
+    id: &'static str,
+    key: &'static str,
+    label: String,
+    state: Option<bool>,
+    cx: &mut Context<Shell>,
+    action: impl Fn(&mut Shell) + 'static,
+) -> Stateful<Div> {
+    let mut row = div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .px(px(12.0))
+        .py(px(6.0))
+        .rounded(px(4.0))
+        .bg(rgba(HUD_BG))
+        .border_1()
+        .border_color(rgba(HUD_BORDER))
+        .cursor_pointer()
+        .hover(|s| s.border_color(rgb(GLOW)))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _e: &MouseDownEvent, window, cx| {
+                window.focus(&this.focus);
+                action(this);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(keycap(key))
+                .child(mono(label, 11.0, PEARL).font_weight(FontWeight::BOLD)),
+        );
+    if let Some(on) = state {
+        row = row.child(
+            mono(
+                if on { "ON" } else { "OFF" },
+                11.0,
+                if on { GLOW } else { PEARL_DIM },
+            )
+            .font_weight(FontWeight::BOLD),
+        );
+    }
+    row
 }
 
 // --------------------------------------------------------------- widgets ----
@@ -653,6 +792,11 @@ impl Render for Shell {
             }
             _ => None,
         };
+        let aim = if self.settings.show_aim_marker {
+            aim
+        } else {
+            None
+        };
 
         div()
             .id("dead-letter")
@@ -697,13 +841,104 @@ impl Render for Shell {
             .children(self.hud_drill(cx))
             .children(self.hud_objective())
             .children(self.overlay(m, cx))
-            .when(self.paused || self.game.phase == Phase::Ready, |root| {
-                root.child(self.hud_bottom_controls())
+            .when(
+                self.settings.show_control_hints
+                    && (self.paused || self.game.phase == Phase::Ready),
+                |root| root.child(self.hud_bottom_controls()),
+            )
+            .when(self.settings_open, |root| {
+                root.child(self.settings_panel(cx))
             })
     }
 }
 
 impl Shell {
+    /// Discoverable entry point shown on the title and pause screens.
+    fn settings_button(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        menu_button(
+            "open-settings",
+            "O",
+            "SETTINGS".to_string(),
+            None,
+            cx,
+            |this| this.open_settings(),
+        )
+    }
+
+    fn settings_panel(&self, cx: &mut Context<Self>) -> Div {
+        let s = self.settings;
+        let mut panel = hud_card()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .w(px(360.0))
+            .px(px(22.0))
+            .py(px(18.0))
+            .border_color(rgb(BRASS))
+            .child(
+                mono("PREFERENCES \u{00b7} SAVED PER USER", 9.0, BRASS)
+                    .font_weight(FontWeight::BOLD),
+            )
+            .child(
+                serif("Settings", 28.0, PEARL)
+                    .font_weight(FontWeight::BOLD)
+                    .line_height(px(32.0)),
+            )
+            .child(rule_alpha(0xe5c14855))
+            .child(menu_button(
+                "set-aim-marker",
+                "1",
+                "AIM MARKER".to_string(),
+                Some(s.show_aim_marker),
+                cx,
+                |this| this.toggle_aim_marker(),
+            ))
+            .child(menu_button(
+                "set-control-hints",
+                "2",
+                "CONTROL HINTS".to_string(),
+                Some(s.show_control_hints),
+                cx,
+                |this| this.toggle_control_hints(),
+            ))
+            .child(menu_button(
+                "set-reset",
+                "R",
+                "RESET DEFAULTS".to_string(),
+                None,
+                cx,
+                |this| this.reset_settings(),
+            ))
+            .child(menu_button(
+                "set-back",
+                "ESC",
+                "BACK".to_string(),
+                None,
+                cx,
+                |this| this.close_settings(),
+            ));
+        if let Some(err) = &self.settings_error {
+            panel = panel.child(
+                mono(err.clone(), 10.0, WAX)
+                    .whitespace_normal()
+                    .font_weight(FontWeight::BOLD),
+            );
+        }
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x040b0df2))
+            .cursor_default()
+            .occlude()
+            .child(panel)
+    }
+
     fn doc_no(&self) -> String {
         format!(
             "UT-{:04}-{}",
@@ -1290,6 +1525,8 @@ impl Shell {
                 panel = panel.child(list);
             }
 
+            let panel = panel.child(self.settings_button(cx));
+
             return Some(
                 panel.child(
                     div()
@@ -1367,7 +1604,8 @@ impl Shell {
                                 "A SHORT DRILL OPENS THE FIRST DELIVERY \u{00b7} TAB SKIPS IT",
                                 10.0,
                                 PEARL_DIM,
-                            )),
+                            ))
+                            .child(self.settings_button(cx)),
                     ),
             ),
             Phase::Choice => {
