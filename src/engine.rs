@@ -1,11 +1,22 @@
 //! DEAD LETTER / THE UNDERTOW POST — deterministic fixed-tick game simulation.
 //!
-//! Everything advances in `step` at 60 Hz. World space is the square arena
-//! `[-ARENA, ARENA]^2`. `Input::movement` is a world-space direction (length is
+//! Everything advances in `step` at 60 Hz. Combat chambers are the square arena
+//! `[-ARENA, ARENA]^2`; the camera there sits at the origin. Before chamber 1 and
+//! chamber 2 the courier walks a hall (`Phase::Explore`, see `floor.rs`): world
+//! space is then the hall's walkable rectangle and `Game::camera` scrolls the view.
+//! `Input::movement` is a world-space direction (length is
 //! clamped to 1), `Input::aim` is a world-space point. `strike`/`cast` auto-repeat
-//! while held; `dash` is edge-triggered.
+//! while held; `dash` is edge-triggered. Halls ignore strike and cast.
 
 use std::ops::{Add, Mul, Sub};
+
+use crate::floor::{floor_for, DoorKind, Floor};
+
+/// Seconds of travel the hall camera looks ahead, capped at `CAMERA_LOOKAHEAD_MAX` units.
+const CAMERA_LOOKAHEAD: f32 = 0.12;
+const CAMERA_LOOKAHEAD_MAX: f32 = 0.8;
+/// Share of the distance to the target the hall camera closes each tick.
+const CAMERA_FOLLOW: f32 = 0.1;
 
 pub const ARENA: f32 = 4.05;
 pub const CHAMBERS: usize = 3;
@@ -139,6 +150,8 @@ pub struct Input {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Ready,
+    /// Walking a hall before a chamber; see `Game::floor`.
+    Explore,
     Combat,
     Choice,
     Won,
@@ -634,6 +647,8 @@ pub struct Game {
     pub enemies: Vec<Enemy>,
     pub shots: Vec<Shot>,
     pub effects: Vec<Effect>,
+    /// Camera point in world space: the hall focus while exploring, the origin in chambers.
+    pub camera: Vec2,
     pub time: f32,
     pub kills: u32,
     /// Boons taken this run.
@@ -724,6 +739,7 @@ impl Game {
             enemies: Vec::with_capacity(12),
             shots: Vec::with_capacity(64),
             effects: Vec::with_capacity(32),
+            camera: Vec2::ZERO,
             time: 0.0,
             kills: 0,
             seal_count: 0,
@@ -773,18 +789,20 @@ impl Game {
         self.seed
     }
 
-    /// Restart the current run in place on the same RNG stream, straight into
-    /// the waves. The drill never changes the seeded run, so it is not replayed.
+    /// Restart the current run in place on the same RNG stream, back at the
+    /// first hall's entrance. The drill never changes the seeded run, so it is not replayed.
     pub fn retry(&mut self) {
         self.lesson = None;
         self.fresh_floor();
+        self.enter_hall();
     }
 
-    /// Begin (or restart) a run at chamber 1.
+    /// Begin (or restart) a run at the first hall's entrance.
     pub fn start(&mut self) {
         self.run += 1;
         self.lesson = None;
         self.fresh_floor();
+        self.enter_hall();
     }
 
     /// Begin a run with the opening drill on the Sorting Floor. Waves hold
@@ -808,6 +826,7 @@ impl Game {
     fn fresh_floor(&mut self) {
         self.reseed();
         self.phase = Phase::Combat;
+        self.camera = Vec2::ZERO;
         self.chamber = 1;
         self.player = Player::new();
         self.enemies.clear();
@@ -830,6 +849,70 @@ impl Game {
         self.wipe_shots = false;
     }
 
+    /// Put the courier at the entrance of the current chamber's hall, if it has one.
+    fn enter_hall(&mut self) {
+        let Some(floor) = floor_for(self.chamber) else {
+            return;
+        };
+        self.phase = Phase::Explore;
+        self.player.pos = floor.entrance;
+        self.player.facing = floor.entrance_facing.norm();
+        self.camera = floor.clamp_camera(floor.entrance);
+        self.lull = 0.8;
+        self.wave = 0;
+    }
+
+    /// The courier crossed the stop door: start the chamber encounter.
+    fn enter_chamber(&mut self) {
+        self.phase = Phase::Combat;
+        self.player.pos = Vec2::ZERO;
+        self.player.dash_time = 0.0;
+        self.player.walking = false;
+        self.camera = Vec2::ZERO;
+        self.enemies.clear();
+        self.pending.clear();
+        self.arrivals.clear();
+        self.shots.clear();
+        self.effects.clear();
+        self.wave = 0;
+        self.lull = 0.8;
+    }
+
+    /// The hall being walked, while `phase` is `Explore`.
+    pub fn floor(&self) -> Option<&'static Floor> {
+        if self.phase == Phase::Explore {
+            floor_for(self.chamber)
+        } else {
+            None
+        }
+    }
+
+    /// One tick in a hall: free movement and dashes against the floor's
+    /// collision, no attacks, no enemies; then the camera and the stop door.
+    fn explore_step(&mut self, input: &Input) {
+        let Some(floor) = self.floor() else {
+            return;
+        };
+        self.time += DT;
+        let before = self.player.pos;
+        self.update_player(input);
+        self.age_effects();
+        let velocity = (self.player.pos - before) * (1.0 / DT);
+        let mut ahead = velocity * CAMERA_LOOKAHEAD;
+        if ahead.len() > CAMERA_LOOKAHEAD_MAX {
+            ahead = ahead.norm() * CAMERA_LOOKAHEAD_MAX;
+        }
+        let target = self.player.pos + ahead;
+        let follow = (target - self.camera) * CAMERA_FOLLOW;
+        self.camera = floor.clamp_camera(self.camera + follow);
+        if floor
+            .door(DoorKind::Stop)
+            .is_some_and(|d| d.contains(self.player.pos))
+        {
+            self.enter_chamber();
+        }
+    }
+
     /// Credit `done` toward the drill if it is the action being asked for.
     fn practised(&mut self, done: Lesson) {
         if self.lesson == Some(done) {
@@ -843,9 +926,16 @@ impl Game {
     }
 
     pub fn step(&mut self, input: Input) {
-        if self.phase != Phase::Combat {
-            self.age_effects();
-            return;
+        match self.phase {
+            Phase::Explore => {
+                self.explore_step(&input);
+                return;
+            }
+            Phase::Combat => {}
+            _ => {
+                self.age_effects();
+                return;
+            }
         }
         self.time += DT;
         self.update_player(&input);
@@ -895,7 +985,10 @@ impl Game {
         self.effects.clear();
         self.wave = 0;
         self.lull = 0.8;
+        self.camera = Vec2::ZERO;
         self.phase = Phase::Combat;
+        // Chambers with a hall start at its entrance instead.
+        self.enter_hall();
     }
 
     /// Single arithmetic path for an endorsement: new mods plus (hp, max_hp).
@@ -1038,6 +1131,7 @@ impl Game {
     // ---------------------------------------------------------------- player
 
     fn update_player(&mut self, input: &Input) {
+        let floor = self.floor();
         let p = &mut self.player;
         p.flash = (p.flash - DT / 0.3).max(0.0);
         p.dash_cooldown = (p.dash_cooldown - DT).max(0.0);
@@ -1097,14 +1191,20 @@ impl Game {
                 duration: 0.3,
                 radius: 0.7,
             });
-            self.practised(Lesson::Dash);
+            if floor.is_none() {
+                self.practised(Lesson::Dash);
+            }
         }
 
         if self.player.dash_time > 0.0 {
             let p = &mut self.player;
             p.dash_time -= DT;
-            p.pos = clamp_arena(p.pos + p.dash_dir * (DASH_SPEED * DT), PLAYER_RADIUS);
-            if self.mods.lash {
+            let step = p.dash_dir * (DASH_SPEED * DT);
+            p.pos = match floor {
+                Some(f) => f.slide(p.pos, step, PLAYER_RADIUS),
+                None => clamp_arena(p.pos + step, PLAYER_RADIUS),
+            };
+            if self.mods.lash && floor.is_none() {
                 self.dash_lash();
             }
             return;
@@ -1112,10 +1212,11 @@ impl Game {
 
         let p = &mut self.player;
         let previous = p.pos;
-        p.pos = clamp_arena(
-            p.pos + mv * (PLAYER_SPEED * self.mods.speed * DT),
-            PLAYER_RADIUS,
-        );
+        let step = mv * (PLAYER_SPEED * self.mods.speed * DT);
+        p.pos = match floor {
+            Some(f) => f.slide(p.pos, step, PLAYER_RADIUS),
+            None => clamp_arena(p.pos + step, PLAYER_RADIUS),
+        };
 
         let distance = (p.pos - previous).len();
         p.walking = distance > 0.0001;
@@ -1125,6 +1226,10 @@ impl Game {
             0.0
         };
 
+        if floor.is_some() {
+            // Halls have no attacks.
+            return;
+        }
         // Anticipate held chains in the previous swing's recovery. A fresh
         // strike still reaches its contact pose on the tick that deals damage.
         p.strike_windup = input.strike && p.strike_cd > 0.0 && p.strike_cd <= 0.075;
@@ -1877,13 +1982,46 @@ impl Game {
 /// Hooks for tests outside this module that stage single attacks.
 #[cfg(test)]
 impl Game {
-    /// A started run whose waves never spawn.
+    /// A started run already in chamber 1 whose waves never spawn.
     pub(crate) fn quiet_arena(seed: u64) -> Game {
         let mut g = Game::new(seed);
         g.start();
+        let main = g.floor().expect("a run starts in a hall").route("main");
+        let main = main.expect("main route").to_vec();
+        g.walk_through(&main);
+        assert_eq!(g.phase, Phase::Combat, "the main route reaches the chamber");
         g.lull = f32::INFINITY;
         g.wave = waves_in(1);
         g
+    }
+
+    /// Walk `points` in order through `step`, steering straight at each one.
+    /// Stops early when the phase leaves `Explore`; panics if a waypoint
+    /// cannot be reached.
+    pub(crate) fn walk_through(&mut self, points: &[Vec2]) {
+        let mut ticks = 0;
+        for &target in points {
+            loop {
+                if self.phase != Phase::Explore {
+                    return;
+                }
+                let to = target - self.player.pos;
+                if to.len() < 0.08 {
+                    break;
+                }
+                ticks += 1;
+                assert!(
+                    ticks < 6_000,
+                    "stuck walking to {target:?} from {:?}",
+                    self.player.pos
+                );
+                self.step(Input {
+                    movement: to.norm(),
+                    aim: target,
+                    ..Input::default()
+                });
+            }
+        }
     }
 
     /// Place an enemy one tick from releasing `attack` toward `dir`, with its aim
@@ -1937,6 +2075,7 @@ mod tests {
     fn arena_game() -> Game {
         let mut g = Game::new(7);
         g.start();
+        enter_combat(&mut g);
         // Skip the opening lull so tests control the roster.
         g.lull = 99.0;
         g.wave = waves_in(1);
@@ -1954,6 +2093,27 @@ mod tests {
 
     fn idle() -> Input {
         Input::default()
+    }
+
+    /// Walk `points` in order through `Game::step`, steering straight at each
+    /// one. Stops early when the phase leaves `Explore`.
+    fn walk(g: &mut Game, points: &[Vec2]) {
+        g.walk_through(points);
+    }
+
+    fn route_of(g: &Game, name: &str) -> Vec<Vec2> {
+        g.floor()
+            .expect("not in a hall")
+            .route(name)
+            .unwrap_or_else(|| panic!("no route {name}"))
+            .to_vec()
+    }
+
+    /// Walk the current hall's main route through the stop door into its chamber.
+    fn enter_combat(g: &mut Game) {
+        let main = route_of(g, "main");
+        walk(g, &main);
+        assert_eq!(g.phase, Phase::Combat, "the main route reaches the chamber");
     }
 
     #[test]
@@ -1981,6 +2141,7 @@ mod tests {
         let run = || {
             let mut g = Game::new(42);
             g.start();
+            enter_combat(&mut g);
             for t in 0..900 {
                 let f = t as f32 * 0.05;
                 g.step(Input {
@@ -2193,6 +2354,7 @@ mod tests {
     fn clearing_chambers_offers_three_distinct_boons_and_ends_in_victory() {
         let mut g = Game::new(3);
         g.start();
+        enter_combat(&mut g);
         let mut ticks = 0;
         loop {
             ticks += 1;
@@ -2209,6 +2371,9 @@ mod tests {
                     let before = g.chamber;
                     g.choose(1);
                     assert_eq!(g.chamber, before + 1);
+                    if g.phase == Phase::Explore {
+                        enter_combat(&mut g);
+                    }
                     assert_eq!(g.phase, Phase::Combat);
                 }
                 Phase::Won => break,
@@ -2219,7 +2384,7 @@ mod tests {
         assert_eq!(g.seal_count as usize, CHAMBERS - 1);
         // Restart resets the run.
         g.start();
-        assert_eq!(g.phase, Phase::Combat);
+        assert_eq!(g.phase, Phase::Explore);
         assert_eq!(g.chamber, 1);
         assert_eq!(g.kills, 0);
     }
@@ -2259,6 +2424,7 @@ mod tests {
     fn wave_entry_points_are_marked_for_the_warning_interval_before_clerks_emerge() {
         let mut g = Game::new(19);
         g.start();
+        enter_combat(&mut g);
         until_marked(&mut g);
         let kinds: Vec<EnemyKind> = g.arrivals.iter().map(|a| a.kind).collect();
         assert_eq!(kinds, [EnemyKind::Bailiff; 2]);
@@ -2305,12 +2471,15 @@ mod tests {
     fn chamber_cleanup_and_restart_clear_marked_arrivals() {
         let mut g = Game::new(23);
         g.start();
+        enter_combat(&mut g);
         until_marked(&mut g);
         // Leaving the chamber while a wave is still marked drops it.
         g.phase = Phase::Choice;
         g.choose(0);
         assert!(g.arrivals.is_empty());
         assert!(g.enemies.is_empty());
+        assert_eq!(g.phase, Phase::Explore);
+        enter_combat(&mut g);
         until_marked(&mut g);
         let kinds: Vec<EnemyKind> = g.arrivals.iter().map(|a| a.kind).collect();
         assert!(
@@ -2320,6 +2489,8 @@ mod tests {
 
         g.start();
         assert!(g.arrivals.is_empty());
+        assert_eq!(g.phase, Phase::Explore);
+        assert!(g.enemies.is_empty());
     }
 
     fn press(strike: bool, cast: bool, dash: bool) -> Input {
@@ -2348,12 +2519,12 @@ mod tests {
     fn fingerprint(g: &Game) -> String {
         let foes: Vec<_> = g.enemies.iter().map(|e| (e.kind, e.pos, e.hp)).collect();
         let shots: Vec<_> = g.shots.iter().map(|s| s.pos).collect();
+        // The clock is left out: walking a hall first only moves where it starts.
         format!(
-            "{:?} {:?} {} {} {} {} {:?} {:?} {:?} {:?} {:?}",
+            "{:?} {:?} {} {} {} {:?} {:?} {:?} {:?} {:?}",
             g.phase,
             g.player.pos,
             g.player.hp,
-            g.time,
             g.kills,
             g.chamber,
             foes,
@@ -2386,6 +2557,7 @@ mod tests {
     fn drill_advances_only_on_the_requested_action() {
         let mut g = Game::new(9);
         g.start_drill();
+        enter_combat(&mut g);
         assert_eq!(g.lesson, Some(Lesson::Strike));
         g.step(press(false, true, false));
         g.step(press(false, false, true));
@@ -2439,6 +2611,7 @@ mod tests {
         let plain = {
             let mut g = Game::new(77);
             g.start();
+            enter_combat(&mut g);
             for t in 0..1_500 {
                 g.step(scripted(t));
             }
@@ -2447,10 +2620,12 @@ mod tests {
 
         let mut drilled = Game::new(77);
         drilled.start_drill();
+        enter_combat(&mut drilled);
         assert_eq!(after_drill(&mut drilled), plain, "completing the drill");
 
         let mut skipped = Game::new(77);
         skipped.start_drill();
+        enter_combat(&mut skipped);
         for t in 0..40 {
             skipped.step(scripted(t));
         }
@@ -2466,12 +2641,14 @@ mod tests {
             let mut g = Game::new(77);
             g.start();
             g.start();
+            enter_combat(&mut g);
             for t in 0..1_500 {
                 g.step(scripted(t));
             }
             fingerprint(&g)
         };
         drilled.start_drill();
+        enter_combat(&mut drilled);
         assert_eq!(after_drill(&mut drilled), second, "replaying the drill");
         assert_ne!(second, plain);
     }
@@ -2496,6 +2673,9 @@ mod tests {
     /// the boss) only once it is felled.
     fn run_trace(g: &mut Game) -> (Vec<Emerged>, Vec<[Boon; 3]>) {
         assert_eq!(g.lesson, None);
+        if g.phase == Phase::Explore {
+            enter_combat(g);
+        }
         let mut emerged: Vec<Emerged> = Vec::new();
         let mut offers = Vec::new();
         let mut held = 0;
@@ -2549,6 +2729,9 @@ mod tests {
                     held = 0;
                     offers.push(g.choices);
                     g.choose(1);
+                    if g.phase == Phase::Explore {
+                        enter_combat(g);
+                    }
                 }
                 Phase::Won => {
                     assert_eq!(held, HOLD_TICKS, "the boss was never held open");
@@ -2688,7 +2871,7 @@ mod tests {
         g.retry();
         assert_eq!(
             (g.phase, g.chamber, g.kills, g.seal_count),
-            (Phase::Combat, 1, 0, 0)
+            (Phase::Explore, 1, 0, 0)
         );
         assert_eq!(run_trace(&mut g), first, "retry replays the run");
         assert_eq!(g.seed(), 5);
@@ -2710,15 +2893,19 @@ mod tests {
         };
         let mut plain = Game::new(5);
         plain.start();
+        enter_combat(&mut plain);
         let expected = play(&mut plain);
 
         // A drilled run, won with endorsements in hand.
         let mut g = Game::new(5);
         g.start_drill();
+        enter_combat(&mut g);
         g.skip_drill();
         let _ = run_trace(&mut g);
         g.retry();
         assert_eq!(g.lesson, None, "retry goes straight to the waves");
+        assert_eq!(g.phase, Phase::Explore);
+        enter_combat(&mut g);
         assert_eq!(play(&mut g), expected);
     }
 
@@ -2966,6 +3153,7 @@ mod tests {
     fn vault_wave_with_a_ward_clerk_only_clears_when_it_falls_too() {
         let mut g = Game::new(3);
         g.start();
+        enter_combat(&mut g);
         g.chamber = 2;
         g.wave = 2;
         g.lull = 0.0;
@@ -3037,6 +3225,9 @@ mod tests {
             g.phase = Phase::Choice;
             g.choices = [b; 3];
             g.choose(0);
+            if g.phase == Phase::Explore {
+                enter_combat(&mut g);
+            }
         }
         g.phase = Phase::Choice;
         g.player.hp = hp.min(g.player.max_hp);
@@ -3048,6 +3239,9 @@ mod tests {
         let mut g = staged(prior, hp);
         g.choices[1] = b;
         g.choose(1);
+        if g.phase == Phase::Explore {
+            enter_combat(&mut g);
+        }
         assert_eq!(g.phase, Phase::Combat, "{b:?} after {prior:?}");
         g
     }
@@ -3262,5 +3456,456 @@ mod tests {
                 assert!(!g.choices.contains(&b), "{b:?} offered while owned");
             }
         }
+    }
+
+    // ------------------------------------------------------------ halls
+
+    /// Like `walk`, but calls `each` after every tick that ends in the hall.
+    fn walk_with(g: &mut Game, points: &[Vec2], mut each: impl FnMut(&Game)) {
+        let mut ticks = 0;
+        for &target in points {
+            loop {
+                if g.phase != Phase::Explore {
+                    return;
+                }
+                let to = target - g.player.pos;
+                if to.len() < 0.08 {
+                    break;
+                }
+                ticks += 1;
+                assert!(
+                    ticks < 6_000,
+                    "stuck walking to {target:?} from {:?}",
+                    g.player.pos
+                );
+                g.step(Input {
+                    movement: to.norm(),
+                    aim: target,
+                    ..idle()
+                });
+                if g.phase == Phase::Explore {
+                    each(g);
+                }
+            }
+        }
+    }
+
+    /// Fell everything and step until the chamber offers its endorsements.
+    fn clear_chamber(g: &mut Game) {
+        for _ in 0..20_000 {
+            g.player.hp = g.player.max_hp;
+            for e in g.enemies.iter_mut() {
+                e.hp = 0.0;
+            }
+            g.step(idle());
+            if g.phase == Phase::Choice {
+                return;
+            }
+        }
+        panic!("chamber {} never cleared", g.chamber);
+    }
+
+    /// A game standing at the entrance of `chamber`'s hall, reached through play.
+    fn hall_game(chamber: usize) -> Game {
+        let mut g = Game::new(31);
+        g.start();
+        for _ in 1..chamber {
+            enter_combat(&mut g);
+            clear_chamber(&mut g);
+            g.choose(0);
+        }
+        assert_eq!(g.phase, Phase::Explore);
+        assert_eq!(g.chamber, chamber);
+        g
+    }
+
+    fn on_segment(p: Vec2, a: Vec2, b: Vec2) -> bool {
+        let ab = b - a;
+        let t = if ab.len_sq() == 0.0 {
+            0.0
+        } else {
+            ((p - a).dot(ab) / ab.len_sq()).clamp(0.0, 1.0)
+        };
+        (a + ab * t - p).len() < 0.01
+    }
+
+    fn on_route(p: Vec2, route: &[Vec2]) -> bool {
+        route.windows(2).any(|w| on_segment(p, w[0], w[1]))
+    }
+
+    /// The main route from its start up to `p`, which lies on it.
+    fn main_to(main: &[Vec2], p: Vec2) -> Vec<Vec2> {
+        let mut out = Vec::new();
+        for w in main.windows(2) {
+            out.push(w[0]);
+            if on_segment(p, w[0], w[1]) {
+                out.push(p);
+                return out;
+            }
+        }
+        panic!("{p:?} is not on the main route");
+    }
+
+    /// The main route from `p`, which lies on it, to its end.
+    fn main_from(main: &[Vec2], p: Vec2) -> Vec<Vec2> {
+        let i = main
+            .windows(2)
+            .position(|w| on_segment(p, w[0], w[1]))
+            .unwrap_or_else(|| panic!("{p:?} is not on the main route"));
+        let mut out = vec![p];
+        out.extend_from_slice(&main[i + 1..]);
+        out
+    }
+
+    fn rect_gap(p: Vec2, min: Vec2, max: Vec2) -> f32 {
+        let dx = (min.x - p.x).max(p.x - max.x).max(0.0);
+        let dy = (min.y - p.y).max(p.y - max.y).max(0.0);
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    /// `(main, loop, side)` of the hall being walked.
+    fn routes(g: &Game) -> (Vec<Vec2>, Vec<Vec2>, Vec<Vec2>) {
+        (
+            route_of(g, "main"),
+            route_of(g, "loop"),
+            route_of(g, "side"),
+        )
+    }
+
+    #[test]
+    fn walking_main_from_the_entrance_starts_the_chamber_through_the_stop_door() {
+        for chamber in [1, 2] {
+            let mut g = hall_game(chamber);
+            let streams = (g.rng, g.formation_rng);
+            let floor = g.floor().unwrap();
+            let stop = floor.door(DoorKind::Stop).unwrap();
+            let main = route_of(&g, "main");
+            let mut last = g.player.pos;
+            walk_with(&mut g, &main, |g| {
+                assert!(
+                    !stop.contains(g.player.pos),
+                    "inside the stop door but still in the hall"
+                );
+                last = g.player.pos;
+            });
+            assert!(
+                rect_gap(last, stop.min, stop.max) <= PLAYER_SPEED * DT + 1e-3,
+                "chamber {chamber}: left the hall {last:?} away from the stop door"
+            );
+            assert_eq!(g.phase, Phase::Combat);
+            assert_eq!(g.chamber, chamber);
+            assert_eq!(g.player.pos, Vec2::ZERO);
+            assert_eq!(g.camera, Vec2::ZERO);
+            assert!(g.floor().is_none());
+            assert!(g.enemies.is_empty() && g.shots.is_empty() && g.arrivals.is_empty());
+            assert_eq!((g.rng, g.formation_rng), streams, "exploring never draws");
+        }
+    }
+
+    #[test]
+    fn the_loop_leaves_main_at_the_junction_and_rejoins_it() {
+        for chamber in [1, 2] {
+            let mut g = hall_game(chamber);
+            let (main, lp, _) = routes(&g);
+            let junction = lp[0];
+            let rejoin = *lp.last().unwrap();
+            assert!(on_route(junction, &main), "the junction lies on main");
+            assert!(
+                on_route(rejoin, &main),
+                "the loop's last point lies on main"
+            );
+
+            walk(&mut g, &main_to(&main, junction));
+            assert_eq!(g.phase, Phase::Explore);
+            assert!((g.player.pos - junction).len() < 0.1);
+            walk(&mut g, &lp);
+            assert_eq!(g.phase, Phase::Explore, "the loop stays in the hall");
+            assert!((g.player.pos - rejoin).len() < 0.1);
+            assert!(on_route(g.player.pos, &main) || (g.player.pos - rejoin).len() < 0.1);
+            walk(&mut g, &main_from(&main, rejoin));
+            assert_eq!(g.phase, Phase::Combat, "main continues to the encounter");
+            assert_eq!(g.chamber, chamber);
+        }
+    }
+
+    #[test]
+    fn the_side_route_reaches_its_door_and_the_hall_stays_open() {
+        for chamber in [1, 2] {
+            let mut g = hall_game(chamber);
+            let (main, lp, side) = routes(&g);
+            let junction = lp[0];
+            assert!(
+                (side[0] - junction).len() < 0.01,
+                "side leaves at the junction"
+            );
+            let door = g.floor().unwrap().door(DoorKind::Side).unwrap();
+            walk(&mut g, &main_to(&main, junction));
+            walk(&mut g, &side);
+            assert_eq!(g.phase, Phase::Explore);
+            assert!(
+                door.contains(g.player.pos),
+                "{:?} is outside the side door",
+                g.player.pos
+            );
+            for _ in 0..60 {
+                g.step(idle());
+                assert_eq!(g.phase, Phase::Explore);
+                assert!(door.contains(g.player.pos));
+            }
+            assert_eq!(g.chamber, chamber);
+        }
+    }
+
+    /// True when a courier of radius `r` at `p` is clear of every block and inside the bounds.
+    fn standable(f: &Floor, p: Vec2, r: f32) -> bool {
+        const E: f32 = 1e-4;
+        let inside = p.x >= f.bounds_min.x + r - E
+            && p.x <= f.bounds_max.x - r + E
+            && p.y >= f.bounds_min.y + r - E
+            && p.y <= f.bounds_max.y - r + E;
+        inside
+            && !f.blocks.iter().any(|b| {
+                p.x > b.min.x - r + E
+                    && p.x < b.max.x + r - E
+                    && p.y > b.min.y - r + E
+                    && p.y < b.max.y + r - E
+            })
+    }
+
+    #[test]
+    fn walls_counters_and_railings_block_walking_and_dashing_alike() {
+        let r = PLAYER_RADIUS;
+        for chamber in [1, 2] {
+            let mut g = hall_game(chamber);
+            let floor = g.floor().unwrap();
+            let mut trials = 0;
+            let mut railing_dashes = 0;
+            for b in &floor.blocks {
+                let mid = (b.min + b.max) * 0.5;
+                let sides = [
+                    (Vec2::new(b.min.x - r - 1.5, mid.y), Vec2::new(1.0, 0.0)),
+                    (Vec2::new(b.max.x + r + 1.5, mid.y), Vec2::new(-1.0, 0.0)),
+                    (Vec2::new(mid.x, b.min.y - r - 1.5), Vec2::new(0.0, 1.0)),
+                    (Vec2::new(mid.x, b.max.y + r + 1.5), Vec2::new(0.0, -1.0)),
+                ];
+                for (side, (start, dir)) in sides.into_iter().enumerate() {
+                    if !standable(floor, start, r) {
+                        continue;
+                    }
+                    if g.phase != Phase::Explore {
+                        g = hall_game(chamber);
+                    }
+                    trials += 1;
+                    // Walk and dash at the block, drifting along it, for six seconds.
+                    g.player.pos = start;
+                    g.player.dash_time = 0.0;
+                    g.player.dash_cooldown = 0.0;
+                    g.prev_dash = false;
+                    for t in 0..360 {
+                        let drift = if (t / 90) % 2 == 0 { 0.3 } else { -0.3 };
+                        g.step(Input {
+                            movement: dir + dir.perp() * drift,
+                            aim: mid,
+                            dash: t % 61 == 0,
+                            ..idle()
+                        });
+                        if g.phase != Phase::Explore {
+                            break;
+                        }
+                        assert!(
+                            standable(floor, g.player.pos, r),
+                            "block {:?}: courier at {:?} overlaps geometry (tick {t})",
+                            (b.min, b.max),
+                            g.player.pos
+                        );
+                    }
+
+                    // One dash straight at a thin railing stops on the near side.
+                    let thin = (b.max.x - b.min.x).min(b.max.y - b.min.y) <= 0.25;
+                    if !thin || g.phase != Phase::Explore {
+                        continue;
+                    }
+                    g.player.pos = start;
+                    g.player.dash_time = 0.0;
+                    g.player.dash_cooldown = 0.0;
+                    g.prev_dash = false;
+                    for t in 0..24 {
+                        g.step(Input {
+                            movement: dir,
+                            aim: mid,
+                            dash: t == 0,
+                            ..idle()
+                        });
+                    }
+                    assert_eq!(g.phase, Phase::Explore);
+                    let p = g.player.pos;
+                    let near = match side {
+                        0 => p.x <= b.min.x - r + 1e-3,
+                        1 => p.x >= b.max.x + r - 1e-3,
+                        2 => p.y <= b.min.y - r + 1e-3,
+                        _ => p.y >= b.max.y + r - 1e-3,
+                    };
+                    assert!(
+                        near,
+                        "dash tunnelled through the railing {:?} to {p:?}",
+                        (b.min, b.max)
+                    );
+                    assert!((p - start).len() > 0.1, "the dash went nowhere");
+                    railing_dashes += 1;
+                }
+            }
+            assert!(
+                trials > 20,
+                "chamber {chamber}: only {trials} blocks reachable"
+            );
+            assert!(
+                railing_dashes > 0,
+                "chamber {chamber}: no railing was dashed at"
+            );
+        }
+    }
+
+    #[test]
+    fn the_camera_follows_the_courier_and_keeps_the_view_inside_the_floor() {
+        for chamber in [1, 2] {
+            let mut g = hall_game(chamber);
+            let floor = g.floor().unwrap();
+            let (main, lp, _) = routes(&g);
+            let mut route = main_to(&main, lp[0]);
+            route.extend_from_slice(&lp);
+            route.extend(main_from(&main, *lp.last().unwrap()));
+            let (w, h) = floor.image_size;
+            let (ox, oy) = floor.origin;
+            let (mut cu_min, mut cu_max) = (f32::MAX, f32::MIN);
+            let mut check = |g: &Game| {
+                let c = g.camera;
+                let cu = 44.0 * (c.x + c.y);
+                let cv = 24.2 * (c.x - c.y);
+                assert!(
+                    cu >= 450.0 - ox - 0.01 && cu <= w - ox - 450.0 + 0.01,
+                    "cu {cu}"
+                );
+                assert!(
+                    cv >= 308.0 - oy - 0.01 && cv <= h - oy - 292.0 + 0.01,
+                    "cv {cv}"
+                );
+                let d = g.player.pos - c;
+                let du = 44.0 * (d.x + d.y);
+                let dv = 24.2 * (d.x - d.y);
+                assert!(
+                    du.abs() <= 240.0 && dv.abs() <= 160.0,
+                    "courier off-centre by ({du}, {dv}) at {:?}",
+                    g.player.pos
+                );
+                cu_min = cu_min.min(cu);
+                cu_max = cu_max.max(cu);
+            };
+            check(&g);
+            walk_with(&mut g, &route, &mut check);
+            assert_eq!(g.phase, Phase::Combat);
+            assert!(
+                cu_max - cu_min > 600.0,
+                "the camera barely scrolled: {cu_min}..{cu_max}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hall_path_does_not_change_the_seeded_run() {
+        for chamber in [1, 2] {
+            let mut direct = hall_game(chamber);
+            let mut detoured = hall_game(chamber);
+            enter_combat(&mut direct);
+
+            let (main, lp, side) = routes(&detoured);
+            walk(&mut detoured, &main_to(&main, lp[0]));
+            walk(&mut detoured, &side);
+            let back: Vec<Vec2> = side.iter().rev().copied().collect();
+            walk(&mut detoured, &back);
+            walk(&mut detoured, &lp);
+            walk(&mut detoured, &main_from(&main, *lp.last().unwrap()));
+            assert_eq!(detoured.phase, Phase::Combat);
+
+            assert_eq!(
+                (direct.rng, direct.formation_rng),
+                (detoured.rng, detoured.formation_rng)
+            );
+            assert_eq!(run_trace(&mut direct), run_trace(&mut detoured));
+        }
+    }
+
+    #[test]
+    fn clearing_chambers_leads_through_the_vault_hall_to_the_office() {
+        let mut g = Game::new(31);
+        g.start();
+        enter_combat(&mut g);
+        assert_eq!(g.chamber, 1);
+        clear_chamber(&mut g);
+        g.choose(0);
+        let vault = g.floor().expect("chamber 2 is preceded by a hall");
+        assert_eq!(
+            (g.phase, g.chamber, vault.id),
+            (Phase::Explore, 2, "vault_stacks")
+        );
+        assert_eq!(g.player.pos, vault.entrance);
+        assert_eq!(g.camera, vault.clamp_camera(vault.entrance));
+        assert!(g.enemies.is_empty() && g.shots.is_empty() && g.arrivals.is_empty());
+
+        enter_combat(&mut g);
+        assert_eq!(g.chamber, 2);
+        clear_chamber(&mut g);
+        g.choose(0);
+        assert_eq!((g.phase, g.chamber), (Phase::Combat, 3));
+        assert!(g.floor().is_none(), "the Office has no hall");
+        assert_eq!((g.player.pos, g.camera), (Vec2::ZERO, Vec2::ZERO));
+    }
+
+    #[test]
+    fn retry_and_the_drill_begin_in_the_first_hall() {
+        let mut g = hall_game(2);
+        g.retry();
+        let first = g.floor().expect("retry lands in a hall");
+        assert_eq!((g.phase, g.chamber, g.lesson), (Phase::Explore, 1, None));
+        assert_eq!((first.id, g.player.pos), ("sorting_hall", first.entrance));
+        assert!(g.enemies.is_empty() && g.arrivals.is_empty());
+
+        let mut g = Game::new(9);
+        g.start_drill();
+        assert_eq!(
+            (g.phase, g.chamber, g.lesson),
+            (Phase::Explore, 1, Some(Lesson::Strike))
+        );
+        // Striking, casting and dashing in the hall do nothing and teach nothing.
+        for t in 0..120 {
+            g.step(Input {
+                aim: Vec2::new(5.0, 5.0),
+                strike: true,
+                cast: true,
+                dash: t % 61 == 0,
+                ..idle()
+            });
+        }
+        assert_eq!(g.phase, Phase::Explore);
+        assert!(g.dash_stamp > 0, "the dash itself works in the hall");
+        assert_eq!(g.lesson, Some(Lesson::Strike));
+        assert!(g.shots.is_empty() && g.enemies.is_empty());
+        assert!(g
+            .effects
+            .iter()
+            .all(|e| !matches!(e.kind, EffectKind::Strike(_))));
+        assert_eq!(g.player.cast_cooldown, 0.0);
+
+        // The drill runs once the courier is in the chamber: waves hold, and a strike counts.
+        enter_combat(&mut g);
+        assert_eq!(g.lesson, Some(Lesson::Strike));
+        for _ in 0..120 {
+            g.step(idle());
+        }
+        assert!(
+            g.enemies.is_empty() && g.arrivals.is_empty(),
+            "waves hold during the drill"
+        );
+        g.step(press(true, false, false));
+        assert_eq!(g.lesson, Some(Lesson::Cast));
     }
 }

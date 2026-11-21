@@ -1,0 +1,49 @@
+# Sorting Floor public hall. Format: see "Floor layouts" in AGENTS.md.
+# World units, the same axes as engine.rs: screen-right is +x+y, screen-down is +x-y.
+floor sorting_hall
+# Design px of the baked image: width, height, then where world (0, 0, 0) lands.
+image 2080 1420 250 680
+bounds 0 0 22 14
+entrance 1.2 2.8 1 0
+landmark 13.9 10.7
+
+# Far walls: the back of the cutaway, tall, never in front of walkable floor.
+# Public doors open in the left wall between y 1.8 and 3.8.
+block wall -0.6 -0.6 0 1.8 3.4
+block wall -0.6 3.8 0 14.6 3.4
+block wall 0 14 16.4 14.6 3.4
+block wall 18.2 14 19.4 14.6 3.4
+block wall 21.2 14 22.6 14.6 3.4
+# Near walls, cut down so the courier stays visible.
+block wall 0 -0.6 22.6 0 0.4
+block wall 22 0 22.6 14 0.4
+# Public counters along the front wall.
+block counter 5 0 8.5 0.8 0.6
+block counter 11 0 14.5 0.8 0.6
+# Cropped parcel counter at the turn; the stop door shows past it.
+block counter 20.4 3.4 22 5.6 0.9
+# Staff sorting aisles beyond a cordon: implied building, not walkable.
+block railing 0 4.6 10.2 4.8 1.0
+block railing 10.0 4.8 10.2 14 1.0
+block rack 1.2 6.4 1.8 14 3.2
+block rack 3.6 6.4 4.2 14 3.2
+block rack 6.0 6.4 6.6 14 3.2
+block rack 8.4 6.4 9.0 14 3.2
+# Sorting tables between the public aisle and the loop.
+block table 11.4 4.6 17.4 5.4 0.8
+# Landmark: the pneumatic exchange tower behind its railing.
+block landmark 12.4 9.2 15.4 12.2 5.0
+block railing 10.2 8.4 16.0 8.6 1.0
+block railing 15.8 8.6 16.0 14 1.0
+
+# Encounter entrances at the junction. Crossing `stop` starts the chamber.
+door side 16.5 13.2 18.1 14
+door stop 19.5 13.2 21.1 14
+
+route main 1.2 2.8 19.0 2.8 19.0 7.4 20.3 9.0 20.3 13.6
+route loop 19.0 7.4 10.9 7.4 10.9 2.8
+route side 19.0 7.4 17.3 9.0 17.3 13.6
+
+view arrival 3.5 2.8
+view junction 19.0 8.6
+view return 10.9 4.0

@@ -100,8 +100,10 @@ def visitors_chair(M):
     box((x - 0.37, y, 1.04), (0.23, 1.12, 1.14), M["leather"], rot=rake, bev=0.10, name="upholstered_back")
     for side in (-1, 1):
         ay = y + side * 0.55
-        box((x, ay, 0.62), (1.02, 0.17, 0.42), M["walnut"], bev=0.055, name="arm_side")
-        box((x + 0.02, ay, 0.81), (1.07, 0.25, 0.22), M["leather"], bev=0.095, name="rolled_arm")
+        # Keep the walnut sides just inside the back's outer side planes.
+        box((x, ay, 0.62), (1.02, 0.168, 0.42), M["walnut"], bev=0.055, name="arm_side")
+        # The bevel inset also clears the walnut arm's vertical panels.
+        box((x + 0.02, ay, 0.81), (1.07, 0.25, 0.22), M["leather"], bev=0.097, name="rolled_arm")
 
 
 def build(M):
