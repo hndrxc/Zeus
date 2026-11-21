@@ -1,7 +1,9 @@
 """Dead Letter / The Undertow Post - canonical asset baker.
 
 Usage (from repo root):
-  "C:/Program Files/Blender Foundation/Blender 5.2/blender.exe" -b -P tools/bake_assets.py -- [--only arena courier ...] [--engine EEVEE|CYCLES]
+  "C:/Program Files/Blender Foundation/Blender 5.2/blender.exe" -b -P tools/bake_assets.py -- [--only arena courier ...] [--engine EEVEE|CYCLES] [--graybox]
+
+--graybox bakes the halls from their layouts' plain boxes.
 
 The arena is framed in a 900x600 layout with ground origin (450,308).
 Sprites use a 256x256 layout with foot anchor (128,176). SS controls output
@@ -90,7 +92,10 @@ def P():
 
 
 def use_gpu(sc):
-    """Render Cycles on the first GPU backend with a device; keep the CPU otherwise."""
+    """Render Cycles on the first GPU backend with a device; keep the CPU otherwise.
+
+    CPU denoising reduces pixel differences between repeated renders.
+    """
     prefs = bpy.context.preferences.addons["cycles"].preferences
     for backend in ("OPTIX", "CUDA", "HIP", "ONEAPI", "METAL"):
         try:
@@ -103,7 +108,7 @@ def use_gpu(sc):
             for d in devices:
                 d.use = d.type != "CPU"
             sc.cycles.device = "GPU"
-            sc.cycles.denoising_use_gpu = True
+            sc.cycles.denoising_use_gpu = False
             print(f"Cycles: {backend} on {', '.join(d.name for d in gpus)}")
             return
     prefs.compute_device_type = "NONE"
@@ -111,7 +116,7 @@ def use_gpu(sc):
     print("Cycles: no GPU backend found, rendering on the CPU")
 
 
-def setup(res_x, res_y, ortho, shift_y_px, transparent, engine="EEVEE", samples=48, gpu=True):
+def setup(res_x, res_y, ortho, shift_y_px, transparent, engine="EEVEE", samples=48):
     sc = bpy.context.scene
     r = sc.render
     r.resolution_x, r.resolution_y, r.resolution_percentage = res_x, res_y, 100
@@ -144,10 +149,7 @@ def setup(res_x, res_y, ortho, shift_y_px, transparent, engine="EEVEE", samples=
         r.engine = "CYCLES"
         sc.cycles.samples = 64
         sc.cycles.use_denoising = True
-        if gpu:
-            use_gpu(sc)
-        else:
-            sc.cycles.device = "CPU"
+        use_gpu(sc)
     try:
         sc.view_settings.view_transform = "Standard"
         sc.view_settings.look = "None"
@@ -355,8 +357,17 @@ def arena_base(M, rnd):
                 box((t, sgn * 4.125, 0.0), (0.27, 0.1, 0.012), m, rot=(0, 0, 0.5), name="haz")
     # edge lip
     for s in (-1, 1):
-        box((s * 4.17, 0, -0.03), (0.06, 8.0, 0.06), M["copper"], name="lip")
-        box((0, s * 4.17, -0.03), (8.0, 0.06, 0.06), M["copper"], name="lip")
+        box((s * 4.17, 0, -0.0145), (0.06, 8.0, 0.029), M["copper"], name="lip")
+        box((0, s * 4.17, -0.0145), (8.0, 0.06, 0.029), M["copper"], name="lip")
+        # The buried lip reflects in the copper band without covering the slab's dark seam.
+        for loc, size in (
+            ((s * 4.1705, 0, -0.04525), (0.061, 8.0, 0.0295)),
+            ((0, s * 4.1705, -0.04525), (8.0, 0.061, 0.0295)),
+        ):
+            strip = box(loc, size, M["copper"], name="lip_reflection")
+            strip.visible_camera = False
+            strip.visible_diffuse = False
+            strip.visible_shadow = False
 
     # side walls: copper bands, rivets, riveted plates (faces +x and -y are visible)
     for z in (-0.12, -0.78):
@@ -456,7 +467,8 @@ def arena_sorting(M, rnd):
             if math.hypot(x, y) > 2.6:
                 break
         a = rnd.uniform(0, math.pi)
-        box((x, y, 0.014), (0.26, 0.17, 0.008), M["paper"], rot=(0, 0, a), name="letter")
+        # Keep the underside clear of rivet tops while preserving the paper face.
+        box((x, y, 0.0145), (0.26, 0.17, 0.007), M["paper"], rot=(0, 0, a), name="letter")
         dx, dy = 0.0, 0.0
         cyl((x, y, 0.02), 0.03, 0.006, M["wax"], rot=(0, 0, a), seg=10, smooth=False)
 
@@ -466,9 +478,11 @@ def arena_sorting(M, rnd):
     ys = [-2.9 + i * 0.6 for i in range(8)]
     for zi in range(0, 7):
         z = 0.35 + zi * 0.42
-        box((rx + 0.12, -0.8, z), (0.5, 4.2, 0.05), M["brass_d"], name="shelf")
+        # Inset from the divider faces and the back and header's end planes.
+        box((rx + 0.1195, -0.8, z), (0.497, 4.198, 0.05), M["brass_d"], name="shelf")
     for y in ys:
-        box((rx + 0.12, y, 1.55), (0.5, 0.05, 2.7), M["brass_d"], name="div")
+        # Keep the divider ends just below the rack's flat top.
+        box((rx + 0.12, y, 1.549), (0.5, 0.05, 2.698), M["brass_d"], name="div")
     for yi in range(7):
         for zi in range(6):
             if rnd.random() < 0.6:
@@ -480,7 +494,7 @@ def arena_sorting(M, rnd):
     text((rx + 0.44, -0.8, 3.0), "SORTING  HALL  -  LETTERS TO THE DROWNED", 0.14, M["black"], rotz=math.pi / 2).rotation_euler = (math.pi / 2, 0, math.pi / 2)
     # rack stands in water: legs
     for y in (-2.8, 1.2):
-        box((rx + 0.1, y, -0.2), (0.4, 0.2, 0.5), M["rust"], name="leg")
+        box((rx + 0.1, y, -0.2), (0.4, 0.198, 0.5), M["rust"], name="leg")
 
     # ---------------- back-right chute machine (y>4.3)
     my = 4.95
@@ -504,7 +518,7 @@ def arena_sorting(M, rnd):
     belt_y = my - 0.65
     box((-1.2, belt_y, 0.12), (4.0, 0.28, 0.16), M["steel"], name="belt")
     for t in range(15):
-        box((-3.0 + t * 0.28, belt_y, 0.22), (0.05, 0.26, 0.04), M["black"], name="slat")
+        box((-3.0 + t * 0.28, belt_y, 0.2195), (0.05, 0.26, 0.041), M["black"], name="slat")
     for t in range(3):
         box((-2.4 + t * 1.3, belt_y, 0.32), (0.3, 0.2, 0.1), M["paper"], rot=(0, 0, 0.2 * t), name="parcel")
     # pneumatic tubes
@@ -913,9 +927,7 @@ def floor_scene(engine, layout):
     fresh()
     M = P()
     W, H, OX, OY = layout.image
-    # CPU only, like arena_scene: coplanar floor/block faces must resolve the
-    # same way on every bake.
-    setup(2 * W, 2 * H, W / PX, (OY - H / 2) * FLOOR_SS, False, engine, samples=64, gpu=False)
+    setup(2 * W, 2 * H, W / PX, (OY - H / 2) * FLOOR_SS, False, engine, samples=64)
     bpy.context.scene.camera.data.shift_x = -(OX - W / 2) / W
     return M
 
@@ -1037,6 +1049,8 @@ def floor_occluders(layout, png_path):
     dump.format.file_format = "OPEN_EXR_MULTILAYER"
     dump.file_output_items.new("FLOAT", "idx")
     group.links.new(layers.outputs["Object Index"], dump.inputs[0])
+    # Only the index pass is kept from this render, and denoising never touches it.
+    sc.cycles.use_denoising = False
     bpy.ops.render.render(write_still=False)
     exrs = sorted(work.glob("*.exr"))
     if len(exrs) != 1:
@@ -1101,7 +1115,7 @@ def floor_occluders(layout, png_path):
 FLOOR_SCRIPTS = {"sorting_hall": "floor_sorting.py", "vault_stacks": "floor_vault.py"}
 
 
-def bake_floor(floor_id, engine, graybox, gpu_preview):
+def bake_floor(floor_id, engine, graybox):
     import runpy
     started = time.perf_counter()
     layout = load_floor(os.path.join(ROOT, "assets", "floors", floor_id + ".floor"))
@@ -1114,15 +1128,6 @@ def bake_floor(floor_id, engine, graybox, gpu_preview):
         runpy.run_path(script, init_globals=globals())["build"](M, layout, random.Random(7))
     else:
         graybox_floor(M, layout)
-    if gpu_preview:
-        # Dev-only GPU preview at reduced samples; never writes to assets/.
-        sc = bpy.context.scene
-        use_gpu(sc)
-        sc.cycles.samples = 24
-        os.makedirs(PREVIEW, exist_ok=True)
-        render(os.path.join(PREVIEW, floor_id + "_preview.png"))
-        print(f"floor preview {floor_id}: {time.perf_counter() - started:.1f}s (gpu)")
-        return
     out_dir = os.path.join(OUT, "floors")
     os.makedirs(out_dir, exist_ok=True)
     png = os.path.join(out_dir, floor_id + ".png")
@@ -1142,9 +1147,7 @@ def render(path):
 def arena_scene(engine):
     fresh()
     M = P()
-    # CPU only: the platform lip and the Sorting Floor rack have coplanar faces
-    # that OptiX resolves differently, so a GPU bake would change the committed art.
-    setup(900 * SS, 600 * SS, 900 / PX, 8 * SS, False, engine, samples=64, gpu=False)
+    setup(900 * SS, 600 * SS, 900 / PX, 8 * SS, False, engine, samples=64)
     return M
 
 
@@ -1182,7 +1185,6 @@ def main():
     if "--engine" in argv:
         engine = argv[argv.index("--engine") + 1].upper()
     graybox = "--graybox" in argv
-    gpu_preview = "--gpu-preview" in argv or "--dev" in argv
     only = []
     if "--only" in argv:
         i = argv.index("--only") + 1
@@ -1194,8 +1196,8 @@ def main():
         "arena": lambda: bake_arena(engine),
         "courier": lambda: bake_courier(engine),
         "bailiff": lambda: bake_enemy("bailiff", build_bailiff, engine),
-        "sorting_hall": lambda: bake_floor("sorting_hall", engine, graybox, gpu_preview),
-        "vault_stacks": lambda: bake_floor("vault_stacks", engine, graybox, gpu_preview),
+        "sorting_hall": lambda: bake_floor("sorting_hall", engine, graybox),
+        "vault_stacks": lambda: bake_floor("vault_stacks", engine, graybox),
         "censor": lambda: bake_enemy("censor", build_censor, engine),
         "postmaster": lambda: bake_enemy("postmaster", build_postmaster, engine),
         "ward_clerk": lambda: bake_ward_clerk(engine),

@@ -26,6 +26,38 @@ def build(M, layout, rnd):
     def box_at(i, loc, size, m, bev=0.0, rot=(0.0, 0.0, 0.0), name="dress"):
         return tag(i, box(loc, size, m, rot=rot, bev=bev, name=name))
 
+    # Pure black, no specular: what the CPU bake showed where two coplanar
+    # faces shadowed each other.
+    dead = mat("vault dead black", (0.0, 0.0, 0.0), 0.0, 1.0)
+    dead.node_tree.nodes["Principled BSDF"].inputs["Specular IOR Level"].default_value = 0.0
+
+    def top_shadow(cx, cy, z, sx, sy):
+        """Keep a top face dark, as the CPU bake rendered it: a flat sheet 4 mm
+        above the face that shadows it and is only hidden from the camera."""
+        ob = box((cx, cy, z + 0.004), (sx, sy, 0.002), dead, name="top_shadow")
+        ob.visible_camera = False
+        return ob
+
+    def face_shadow(loc, size):
+        """Shadow-only sheet in front of a face: darkens it as the CPU bake did
+        where coplanar faces shaded each other, leaving reflections alone."""
+        ob = box(loc, size, dead, name="face_shadow")
+        ob.visible_camera = False
+        ob.visible_glossy = False
+        ob.visible_transmission = False
+        ob.visible_volume_scatter = False
+        return ob
+
+    def edge_band(i, bx0, by0, bx1, by1, h):
+        """Dead-black band under the brass top edge on the camera-facing faces
+        (-y and +x): the CPU bake showed the coplanar cap and wall faces there as
+        a black line. Laid 1 mm proud of the face."""
+        for loc, size in (
+                (((bx0 + bx1) / 2.0, by0 - 0.001), (bx1 - bx0 - 0.10, 0.002)),
+                ((bx1 + 0.001, (by0 + by1) / 2.0), (0.002, by1 - by0 - 0.10))):
+            tag(i, box((loc[0], loc[1], h - 0.040), (size[0], size[1], 0.026), dead,
+                       name="edge_band"))
+
     x0, y0, x1, y1 = layout.bounds
     cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
     width, depth = x1 - x0, y1 - y0
@@ -56,9 +88,10 @@ def build(M, layout, rnd):
             elif rnd.random() < 0.06:
                 m = M["teal_l"]
             box((px, py, 0.018), (0.96, 0.96, 0.036), m, bev=0.012, name="tile")
-    box((cx, y0 - 0.11, 0.025), (width + 1.2, 0.13, 0.05), M["brass_d"],
+    # Cut edges end 1 mm inside the near walls that bury them.
+    box((cx, y0 - 0.11, 0.025), (width + 1.198, 0.13, 0.05), M["brass_d"],
         bev=0.02, name="cut_edge")
-    box((x1 + 0.11, cy, 0.025), (0.13, depth + 1.2, 0.05), M["brass_d"],
+    box((x1 + 0.11, cy, 0.025), (0.13, depth + 1.198, 0.05), M["brass_d"],
         bev=0.02, name="cut_edge")
     for px, py in ((-0.65, -0.65), (20.65, -0.65), (-0.65, 16.65),
                    (20.65, 16.65), (10.0, -0.65), (10.0, 16.65),
@@ -69,8 +102,10 @@ def build(M, layout, rnd):
     # except these flat plates).
     box((0.55, 2.0, 0.035), (1.1, 2.0, 0.07), M["teal_l"], bev=0.015,
         name="entrance_plate")
-    box((0.55, 1.82, 0.055), (0.9, 0.10, 0.03), M["copper"], name="threshold")
-    box((0.55, 2.18, 0.055), (0.9, 0.10, 0.03), M["copper"], name="threshold")
+    # Thresholds sit 1 mm proud of the plate (CPU showed them) and stay black.
+    for ty in (1.82, 2.18):
+        box((0.55, ty, 0.056), (0.9, 0.10, 0.03), M["copper"], name="threshold")
+        top_shadow(0.55, ty, 0.071, 0.9, 0.10)
     for px, py in ((3.8, 2.0), (7.0, 2.0), (10.5, 4.6), (10.5, 7.2),
                    (11.8, 9.9), (14.2, 11.3), (16.5, 9.9), (18.6, 6.2),
                    (18.6, 3.4), (15.2, 2.0), (12.0, 2.0)):
@@ -83,24 +118,44 @@ def build(M, layout, rnd):
             continue
         size = (b.x1 - b.x0, b.y1 - b.y0, b.h)
         c = ((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0, b.h / 2.0)
-        tag(i, box(c, size, M["teal_d"], bev=0.025, name="wall"))
+        # The brass cap is the visible wall top. The body ends 35 mm below it,
+        # inside the cap, so its top and flat sides never share a plane with the
+        # cap's (Embree and OptiX break such ties differently) and the cap keeps
+        # the exact silhouette the CPU bake had.
+        tag(i, box((c[0], c[1], (b.h - 0.035) / 2.0),
+                   (size[0], size[1], b.h - 0.035), M["teal_d"], bev=0.025,
+                   name="wall"))
         tag(i, box((c[0], c[1], b.h - 0.035), (size[0], size[1], 0.07),
                    M["brass_d"], bev=0.012, name="wall_cap"))
+        if b.h < 1.0 or i == 0:  # near-wall and entrance-wall tops render dark
+            top_shadow(c[0], c[1], b.h, size[0] - 0.046, size[1] - 0.046)
+        edge_band(i, b.x0, b.y0, b.x1, b.y1, b.h)
         dx, dy = size[0], size[1]
         if dx > dy and b.h > 1.0:  # far north wall: panel strip on -y face
             n = max(2, int(dx / 2.2))
             for k in range(n):
                 px = b.x0 + (k + 0.5) * dx / n
-                box_at(i, (px, b.y0 + 0.045, b.h / 2.0),
-                       (dx / n - 0.35, 0.09, b.h - 0.75), M["gunmetal"],
-                       bev=0.015, name="wall_panel")
+                pw, ph = dx / n - 0.35, b.h - 0.75
+                # The CPU showed some panels as darkened wall glass and hid the
+                # rest; the shown ones stand 1 mm proud under a shadow-only sheet,
+                # the others sit 1 mm inside the face.
+                shown = (i, k) in ((2, 2), (2, 3), (2, 4), (3, 0), (3, 1), (4, 0))
+                box_at(i, (px, b.y0 + (0.044 if shown else 0.046), b.h / 2.0),
+                       (pw, 0.09, ph), M["gunmetal"], bev=0.015, name="wall_panel")
+                if shown:
+                    face_shadow((px, b.y0 - 0.006, b.h / 2.0), (pw, 0.002, ph))
         elif dy > dx and b.h > 1.0:  # west wall: panels on +x face
             n = max(2, int(dy / 2.4))
             for k in range(n):
                 py = b.y0 + (k + 0.5) * dy / n
-                box_at(i, (b.x1 - 0.045, py, b.h / 2.0),
-                       (0.09, dy / n - 0.4, b.h - 0.75), M["gunmetal"],
-                       bev=0.015, name="wall_panel")
+                if i == 0:  # the CPU bake showed these panels, pure black
+                    box_at(i, (b.x1 - 0.044, py, b.h / 2.0),
+                           (0.09, dy / n - 0.4, b.h - 0.75), dead,
+                           bev=0.015, name="wall_panel")
+                else:  # hidden in the wall face, as on the CPU
+                    box_at(i, (b.x1 - 0.046, py, b.h / 2.0),
+                           (0.09, dy / n - 0.4, b.h - 0.75), M["gunmetal"],
+                           bev=0.015, name="wall_panel")
 
     # Entrance opening in the left wall (between y 1 and 3).
     box((-0.78, 2.0, 1.35), (0.28, 2.0, 2.7), M["black"], name="entrance_void")
@@ -170,17 +225,27 @@ def build(M, layout, rnd):
         body = M["teal_d"]
         if cut_top:
             body = M["steel"]
-        tag(i, box(c, (dx, dy, b.h), body, bev=0.025, name="stack_body"))
+        # The body top sits 1 mm under the cornice top (which keeps the CPU
+        # silhouette) so the two never share a plane.
+        tag(i, box((c[0], c[1], (b.h - 0.001) / 2.0), (dx, dy, b.h - 0.001), body,
+                   bev=0.025, name="stack_body"))
         tag(i, box((c[0], c[1], b.h - 0.03), (dx - 0.02, dy - 0.02, 0.06),
                    M["brass_d"], bev=0.012, name="stack_cornice"))
+        top_shadow(c[0], c[1], b.h, dx - 0.046, dy - 0.046)  # tops render dark
+        if not cut_top:  # the steel sectioned stacks show no band
+            edge_band(i, b.x0, b.y0, b.x1, b.y1, b.h)
         cols = cols or max(3, min(6, int(dy / 0.9)))
         py, pz = dy / cols, b.h / (rows + 0.5)
+        # Drawers stand 1 mm proud of the stack face and render pure black, as on
+        # the CPU; the one sectioned stack at x 13.6 showed its body instead, so
+        # its drawers sink 1 mm behind the face.
+        lip = -0.036 if abs(b.x0 - 13.6) < 1e-6 else -0.0347
         for cc in range(cols):
             cy = b.y0 + (cc + 0.5) * py
             for rr in range(rows):
                 cz = 0.20 + rr * pz
-                box_at(i, (b.x1 - 0.035, cy, cz), (0.07, py - 0.06, pz - 0.07),
-                       M["gunmetal"], bev=0.010, name="drawer")
+                box_at(i, (b.x1 + lip, cy, cz), (0.07, py - 0.06, pz - 0.07),
+                       dead, bev=0.010, name="drawer")
                 box_at(i, (b.x1 + 0.010, cy, cz), (0.035, py * 0.36, 0.075),
                        M["pearl"], name="label")
         if b.h > 2.0:
@@ -190,8 +255,12 @@ def build(M, layout, rnd):
                 cx = b.x0 + (cc + 0.5) * sx
                 for rr in range(south_rows):
                     cz = 0.35 + rr * pz
-                    box_at(i, (cx, b.y0 + 0.035, cz), (sx - 0.07, 0.07, pz - 0.08),
-                           M["gunmetal"], bev=0.010, name="drawer")
+                    # the CPU showed the body, not these drawers, on the upper right
+                    # of the 6.2 and 14.4 ranks
+                    sink = (b.x0, b.y0) in ((0.0, 6.2), (0.0, 14.4)) and cc >= 4 and rr == 1
+                    box_at(i, (cx, b.y0 + (0.036 if sink else 0.0347), cz),
+                           (sx - 0.07, 0.07, pz - 0.08), dead, bev=0.010,
+                           name="drawer")
                     box_at(i, (cx, b.y0 - 0.010, cz), (sx * 0.34, 0.035, 0.07),
                            M["brass_d"], name="pull")
         for k in range(3):  # copper ribs on the camera side
@@ -201,14 +270,22 @@ def build(M, layout, rnd):
         if cut_top:
             tag(i, box((c[0], c[1], b.h + 0.005), (dx - 0.13, dy - 0.13, 0.045),
                        M["teal_m"], bev=0.012, name="cut_top"))
+            letter_y = None  # box letters overlap their neighbours 5 cm in y
             for k in range(3):
                 t = 0.25 + 0.25 * k
                 if rnd.random() < 0.5:
                     tag(i, sph((c[0], b.y0 + t * dy, b.h + 0.075),
                                0.10, M["paper"], scale=(1.4, 1.3, 0.55), seg=12))
+                    letter_y = None
                 else:
-                    box_at(i, (c[0], b.y0 + t * dy, b.h + 0.055),
+                    ly = b.y0 + t * dy
+                    box_at(i, (c[0], ly, b.h + 0.055),
                            (0.22, 0.30, 0.06), M["pearl"], bev=0.012, name="letter")
+                    gap = 0.30 - 0.25 * dy  # overlap band; the CPU showed it black
+                    if letter_y is not None and gap > 0.024:
+                        top_shadow(c[0], (ly + letter_y) / 2.0, b.h + 0.085,
+                                   0.196, gap - 0.024)
+                    letter_y = ly
 
     # Long archive ranks (west and north), tall and enclosed.
     west = [find(lambda b: b.kind == "stack" and b.x0 == 0 and b.y0 == v)
@@ -232,9 +309,12 @@ def build(M, layout, rnd):
         b = blk(i)
         dx, dy = b.x1 - b.x0, b.y1 - b.y0
         c = ((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0, b.h / 2.0)
-        tag(i, box(c, (dx, dy, b.h), M["steel"], bev=0.018, name="railing_body"))
+        # As on the walls, the body ends inside the cap so no faces are coplanar.
+        tag(i, box((c[0], c[1], (b.h - 0.04) / 2.0), (dx, dy, b.h - 0.04),
+                   M["steel"], bev=0.018, name="railing_body"))
         tag(i, box((c[0], c[1], b.h - 0.03), (dx, dy, 0.07), M["brass_d"],
                    bev=0.012, name="rail_cap"))
+        edge_band(i, b.x0, b.y0, b.x1, b.y1, b.h + 0.005)
         long_x = dx >= dy
         spans = dx if long_x else dy
         n = max(2, int(spans / 0.8) + 1)

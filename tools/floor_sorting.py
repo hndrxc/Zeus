@@ -147,11 +147,28 @@ def pavement(m, layout, rnd):
         letter(f,x,y,.008,m,rnd.uniform(-.6,.6))
 
 
+def recess_shoulder(panel, z, width, depth, du=0, dv=0):
+    """Taper the panel above z without changing its lower outline."""
+    mesh = bmesh.new()
+    mesh.from_mesh(panel.data)
+    shoulder = z - panel.location.z
+    bmesh.ops.bisect_plane(mesh, geom=[*mesh.verts, *mesh.edges, *mesh.faces],
+                          dist=.00001, plane_co=(0,0,shoulder), plane_no=(0,0,1))
+    for vert in mesh.verts:
+        if vert.co.z > shoulder+.00001:
+            vert.co.x *= 1-2*du/width
+            vert.co.y *= 1-2*dv/depth
+    mesh.to_mesh(panel.data)
+    mesh.free()
+
+
 def wall(m,b):
     f,L,D = aligned(b); h=b.h
     if h < 1:
         # Sawed-through enamel parapet, section cap with exposed brass channel.
-        f.panel(0,0,h*.46,L,D,h*.92,m['case'],.035)
+        # Recess only the covered shoulder; keep the base flush with the hull.
+        body = f.panel(0,0,h*.46,L,D,h*.92,m['case'],.035)
+        recess_shoulder(body,h-.12,L,D,du=.002,dv=.002)
         f.panel(0,0,h-.055,L,D,.11,m['copper'],.018)
         f.panel(0,0,h+.005,L-.03,D-.15,.032,m['section'],.01)
         for v in (-D*.29,D*.29):
@@ -162,9 +179,18 @@ def wall(m,b):
             f.panel(u,0,h+.026,.043,D-.05,.018,m['steel'])
         return
     # Layered cast-iron wall; long bays contain arched wired-glass clerestories.
-    f.panel(0,.065,h/2,L,D-.13,h,m['case'],.04)
-    for z,depth,thick,material in ((.21,D,.36,'gunmetal'),(.47,D,.075,'brass_d'),(2.73,D,.11,'copper'),(h-.18,D,.20,'case'),(h-.055,D,.09,'brass_d')):
-        f.panel(0,0,z,L,depth,thick,m[material],.022)
+    # At the wall ends, copper and brass sit ahead of the core, which covers the gunmetal band.
+    f.panel(0,.065,h/2,L-.004,D-.13,h,m['case'],.04)
+    for z,depth,thick,material,trim in (
+        (.21,D,.36,'gunmetal',.008),
+        (.47,D,.075,'brass_d',0),
+        (2.73,D,.11,'copper',0),
+        (h-.18,D,.20,'case',.006),
+        (h-.055,D,.09,'brass_d',0),
+    ):
+        band = f.panel(0,0,z,L-trim,depth,thick,m[material],.022)
+        if material == 'case':
+            recess_shoulder(band,h-.11,L-trim,depth,dv=.002)
     n=max(1,round(L/2.2)); pitch=L/n
     for i in range(n):
         u = (i+.5)*pitch-L/2; r=min(.65,pitch*.33)
@@ -178,7 +204,7 @@ def wall(m,b):
             f.rod((u,face-.12,1.87),(u+r*math.cos(a),face-.12,1.87+r*math.sin(a)),.022,m['case'])
         for t in (-1,0,1):
             f.panel(u+t*r,face-.12,1.50,.051,.04,.78,m['case'])
-        f.panel(u,face-.12,1.86,2*r,.04,.053,m['case'])
+        f.panel(u,face-.119,1.86,2*r,.04,.053,m['case'])
         f.panel(u,face-.11,1.10,2*r+.14,.11,.11,m['brass_d'],.018)
         f.panel(u,face,.79,pitch-.39,.10,.43,m['patina'],.035)
         for t in range(3):
@@ -200,7 +226,8 @@ def threshold(m,f,width,kind):
     for s in (-1,1):
         u=s*(r+.08)
         f.panel(u,.37,spring*.5,.22,.66,spring,m['gunmetal'],.05)
-        f.panel(u,.085,spring*.5,.12,.115,spring,m['copper'],.035)
+        # Pull the copper returns and top behind the gunmetal jamb.
+        f.panel(u,.085,(spring-.002)*.5,.118,.115,spring-.002,m['copper'],.035)
         for z,d in ((.16,.25),(.39,.09),(1.82,.10),(spring,.16)):
             f.panel(u,.145,z,.25,.24,d,metal,.025)
         f.panel(u-s*.115,.115,1.25,.037,.073,1.01,m['dim_b'] if dark else m['lamp'])
@@ -241,8 +268,10 @@ def threshold(m,f,width,kind):
                 f.panel(k*.47,2.41,1.47,.47,.045,.73,m['glass'],.05)
         light('POINT',f.p(0,.87,2.03),120 if kind=='stop' else 54,(1,.63,.29),.50)
     f.panel(0,-.23,.013,width-.06,.41,.019,m['joint'],.008)
+    # The stop's hazard tiles cover the ends of the brass inlays.
+    inlay_height = .006 if kind == 'stop' else .008
     for i in (-1,0,1):
-        f.panel(0,-.23+i*.116,.026,width-.18,.028,.008,metal)
+        f.panel(0,-.23+i*.116,.022+inlay_height/2,width-.18,.028,inlay_height,metal)
 
 
 def cordon(m,b):

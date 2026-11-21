@@ -75,6 +75,6 @@ blender -b -P tools/bake_assets.py -- --only ward_clerk
 blender -b -P tools/bake_assets.py
 ```
 
-Character bakes render Cycles on the first GPU backend Blender finds (OptiX, CUDA, HIP, oneAPI or Metal), denoise there too, and fall back to the CPU without one. Chamber backgrounds always render on the CPU, because overlapping faces on the platform lip and the Sorting Floor rack render differently on the GPU and would change the committed art.
+By default, Cycles renders on the first GPU backend Blender finds (OptiX, CUDA, HIP, oneAPI or Metal) and falls back to the CPU without one. Cycles denoises on the CPU to reduce pixel differences between repeated bakes.
 
 The available jobs are `arena`, `courier`, `bailiff`, `censor`, `ward_clerk` and `postmaster`. To rebuild only the chamber art, run `blender -b -P tools/bake_assets.py -- --only arena`. It writes `assets/arena.png` (Sorting Floor), `assets/arena_vault.png` (Dead Letter Vault) and `assets/arena_office.png` (Postmaster’s Office). All three are 2700 × 1800 and share one registration to the 900 × 600 design space. Each 768 × 768 character frame represents a 256 × 256 sprite in that space. Each character has eight orthographic views. Directions 0 through 3 face +X, +Y, −X and −Y. Directions 4 through 7 face the diagonals at 45°, 135°, 225° and 315° from +X. The courier uses 27 frames per view, with the backhand at 19–22 and the finishing chop at 23–26. Rebuild the executable after a bake to pick up changed PNGs.
